@@ -1,6 +1,7 @@
 """
 NeuroX Hybrid - Advanced Brain Analysis Platform
 Single file implementation for Kaggle notebooks
+Name: Gotam Sai Varshith
 """
 
 # Standard library imports
