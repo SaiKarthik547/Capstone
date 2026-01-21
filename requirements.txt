@@ -10,6 +10,7 @@ monai
 trimesh
 
 # --- Visualization & UI ---
+hd-bet
 plotly
 streamlit
 matplotlib

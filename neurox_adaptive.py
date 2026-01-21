@@ -2156,73 +2156,34 @@ def run_streamlit_app():
             </div>
             """, unsafe_allow_html=True)
             
-            viz_mode = st.radio(
-                "Visualization Mode",
-                ["💎 Surface Rendering", "📊 Volume Rendering", "📸 Slice Views"],
-                horizontal=True
+            # Patient-specific brain visualization (Otsu brain mask + separate lesion meshes)
+            print("\n" + "="*60)
+            print("🎬 Starting 3D visualization...")
+            print(f"📊 Segmentations available: {list(st.session_state.segmentation_results.keys())}")
+            print(f"📏 Original volume shape: {st.session_state.original_image.shape}")
+            print(f"📐 Voxel spacing: {st.session_state.spacing}")
+            print("="*60 + "\n")
+            
+            fig_3d = create_3d_visualization(
+                segmentations_roi=st.session_state.segmentation_results,
+                roi_metadata=st.session_state.roi_metadata,
+                original_volume=st.session_state.original_image,
+                affine=st.session_state.affine,
+                spacing=st.session_state.spacing,
+                show_patient_brain=show_atlas  # Reusing checkbox for patient brain
             )
             
-            if "Surface" in viz_mode:
-                # Patient-specific brain visualization (Otsu brain mask + separate lesion meshes)
-                print("\n" + "="*60)
-                print("🎬 Starting 3D visualization...")
-                print(f"📊 Segmentations available: {list(st.session_state.segmentation_results.keys())}")
-                print(f"📏 Original volume shape: {st.session_state.original_image.shape}")
-                print(f"📐 Voxel spacing: {st.session_state.spacing}")
-                print("="*60 + "\n")
-                
-                fig_3d = create_3d_visualization(
-                    segmentations_roi=st.session_state.segmentation_results,
-                    roi_metadata=st.session_state.roi_metadata,
-                    original_volume=st.session_state.original_image,
-                    affine=st.session_state.affine,
-                    spacing=st.session_state.spacing,
-                    show_patient_brain=show_atlas  # Reusing checkbox for patient brain
-                )
-                
-                # Check if figure has any data
-                if len(fig_3d.data) == 0:
-                    st.error("❌ No 3D meshes generated. Check console for errors.")
-                    print("❌ ERROR: No meshes in figure!")
-                else:
-                    print(f"\n✅ Figure ready: {len(fig_3d.data)} meshes")
-                    for i, trace in enumerate(fig_3d.data):
-                        print(f"  Mesh {i+1}: {trace.name}")
-                    print()
-                
-                st.plotly_chart(fig_3d, use_container_width=True)
+            # Check if figure has any data
+            if len(fig_3d.data) == 0:
+                st.error("❌ No 3D meshes generated. Check console for errors.")
+                print("❌ ERROR: No meshes in figure!")
+            else:
+                print(f"\n✅ Figure ready: {len(fig_3d.data)} meshes")
+                for i, trace in enumerate(fig_3d.data):
+                    print(f"  Mesh {i+1}: {trace.name}")
+                print()
             
-            elif "Volume" in viz_mode:
-                if show_volume:
-                    fig_vol = create_volume_rendering(
-                        st.session_state.segmentation_results,
-                        st.session_state.roi_metadata,
-                        st.session_state.original_image,
-                        downsample_factor=4
-                    )
-                    st.plotly_chart(fig_vol, use_container_width=True)
-                else:
-                    st.info("Enable 'Volume Rendering' in sidebar to view")
-            
-            else:  # Slice Views
-                if st.session_state.original_image is not None:
-                    col1, col2 = st.columns([1, 3])
-                    
-                    with col1:
-                        axis = st.selectbox("Plane", ["Axial", "Coronal", "Sagittal"])
-                        axis_map = {"Axial": 2, "Coronal": 1, "Sagittal": 0}
-                        max_slice = st.session_state.original_image.shape[axis_map[axis]] - 1
-                        slice_idx = st.slider("Slice", 0, max_slice, max_slice // 2)
-                    
-                    with col2:
-                        fig_slice = create_slice_view(
-                            st.session_state.original_image,
-                            st.session_state.segmentation_results,
-                            st.session_state.roi_metadata,  # Pass roi_metadata
-                            axis_map[axis],
-                            slice_idx
-                        )
-                        st.pyplot(fig_slice)
+            st.plotly_chart(fig_3d, use_container_width=True)
         else:
             st.info("No visualization data available. Complete analysis first.")
     
