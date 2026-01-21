@@ -1,0 +1,23 @@
+# --- Core Math & AI ---
+numpy<2.0
+torch
+scipy
+scikit-image
+nibabel
+
+# --- Medical AI Specific ---
+monai
+trimesh
+
+# --- Visualization & UI ---
+plotly
+streamlit
+matplotlib
+
+# --- Reporting & Utils ---
+reportlab
+groq
+
+# --- Critical Fixes (Do not remove) ---
+protobuf==3.20.3
+tensorboard==2.16.2
