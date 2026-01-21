@@ -39,13 +39,37 @@ except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
 
-# HD-BET for Robust Brain Extraction
+# HD-BET for Medical-Grade Brain Extraction (CLI-BASED)
+# Using CLI interface (official, stable) instead of Python imports (unreliable)
+import subprocess
+
+HDBET_AVAILABLE = False
+
+print("=" * 60)
+print("🔍 Checking for HD-BET (CLI)...")
+
 try:
-    from HD_BET.run import run_hd_bet
-    HDBET_AVAILABLE = True
-except ImportError:
-    HDBET_AVAILABLE = False
-    run_hd_bet = None
+    result = subprocess.run(
+        ["hd-bet", "-h"],
+        capture_output=True,
+        text=True,
+        timeout=30  # HD-BET can take time to load
+    )
+    if result.returncode == 0:
+        HDBET_AVAILABLE = True
+        print("✅ HD-BET CLI is available and working")
+        print("🎯 HD-BET WILL BE USED as the ONLY brain extraction method")
+        print("   (No fallback to heuristics - clinical standard)")
+    else:
+        print("❌ HD-BET CLI returned error")
+except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+    print(f"❌ HD-BET CLI not found: {e}")
+    print("⚠️  3D brain surface rendering will be DISABLED")
+    print("   This is CORRECT behavior for clinical safety")
+    print("\n   To install HD-BET:")
+    print("   pip install HD-BET")
+
+print("=" * 60)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PRODUCTION CONFIGURATION
@@ -780,39 +804,107 @@ def generate_patient_brain_surface(
 # MORPHOLOGICAL CLEANING & ANATOMICAL POST-PROCESSING
 # ═══════════════════════════════════════════════════════════════════════════
 
-def apply_hdbet_preprocessing(volume: np.ndarray, affine: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[Tuple]]:
-    """Apply HD-BET for robust brain extraction preprocessing."""
+def apply_hdbet_brain_extraction(volume: np.ndarray, affine: np.ndarray, spacing: Tuple[float, float, float]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Medical-grade skull stripping using HD-BET CLI (GOLD STANDARD).
+    
+    This is the ONLY brain extraction method used for 3D visualization.
+    NO FALLBACK to heuristics - hard failure if HD-BET unavailable.
+    
+    Returns:
+        (brain_volume, brain_mask) if successful
+        (None, None) if failed (3D rendering will be disabled)
+    """
     if not HDBET_AVAILABLE:
+        print("❌ HD-BET CLI not available")
         return None, None
+    
+    print("\n" + "="*60)
+    print("🧠 HD-BET BRAIN EXTRACTION (Medical-Grade)")
+    print("="*60)
+    
     try:
-        with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as tmp_input:
-            tmp_input_path = tmp_input.name
-            nib.save(nib.Nifti1Image(volume, affine), tmp_input_path)
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            run_hd_bet(tmp_input_path, tmp_dir, mode='fast', 
-                      device='cpu' if not torch.cuda.is_available() else 'cuda',
-                      postprocess=False, do_tta=False)
-            mask_path = Path(tmp_dir) / f"{Path(tmp_input_path).stem}_mask.nii.gz"
-            if mask_path.exists():
-                brain_mask = nib.load(str(mask_path)).get_fdata() > 0
-                coords = np.argwhere(brain_mask > 0)
-                if len(coords) > 0:
-                    min_coords = coords.min(axis=0)
-                    max_coords = coords.max(axis=0)
-                    margin = 5
-                    shape = brain_mask.shape
-                    bbox = tuple([slice(max(0, min_coords[i] - margin), 
-                                       min(shape[i], max_coords[i] + margin + 1))
-                                 for i in range(3)])
-                    os.unlink(tmp_input_path)
-                    return brain_mask, bbox
-        if os.path.exists(tmp_input_path):
-            os.unlink(tmp_input_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Save input
+            input_path = os.path.join(tmpdir, "input.nii.gz")
+            output_path = os.path.join(tmpdir, "output.nii.gz")  # HD-BET requires .nii.gz
+            
+            print(f"📝 Saving temporary NIfTI...")
+            nib.save(nib.Nifti1Image(volume, affine), input_path)
+            print(f"   Input: {input_path}")
+            
+            # Call HD-BET CLI
+            print(f"🔧 Running HD-BET CLI...")
+            cmd = [
+                "hd-bet",
+                "-i", input_path,
+                "-o", output_path,
+                "-device", "cpu",    # CPU for compatibility
+                "--disable_tta"      # Disable test-time augmentation (faster)
+            ]
+            
+            print(f"   Command: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minutes max
+            )
+            
+            if result.returncode != 0:
+                print(f"❌ HD-BET failed with code {result.returncode}")
+                print(f"   stderr: {result.stderr}")
+                return None, None
+            
+            print(f"✅ HD-BET completed successfully")
+            
+            # Load results - HD-BET adds "_bet" suffix
+            brain_path = output_path.replace(".nii.gz", "_bet.nii.gz")
+            mask_path = output_path.replace(".nii.gz", "_bet_mask.nii.gz")
+            
+            print(f"� Loading output files...")
+            print(f"   Brain: {brain_path}")
+            print(f"   Mask:  {mask_path}")
+            
+            if not os.path.exists(brain_path) or not os.path.exists(mask_path):
+                print(f"❌ Output files not found")
+                return None, None
+            
+            brain_volume = nib.load(brain_path).get_fdata()
+            brain_mask = nib.load(mask_path).get_fdata().astype(bool)
+            
+            # CRITICAL: Validate brain mask
+            brain_voxels = brain_mask.sum()
+            total_voxels = brain_mask.size
+            ratio = brain_voxels / total_voxels
+            
+            print(f"\n📊 Brain Mask Validation:")
+            print(f"   Total voxels: {total_voxels:,}")
+            print(f"   Brain voxels: {brain_voxels:,}")
+            print(f"   Ratio: {ratio:.1%}")
+            
+            if ratio < 0.05:
+                print(f"❌ VALIDATION FAILED: Brain mask too small ({ratio:.1%} < 5%)")
+                print(f"   Possible empty or failed extraction")
+                return None, None
+            
+            if ratio > 0.7:
+                print(f"❌ VALIDATION FAILED: Brain mask too large ({ratio:.1%} > 70%)")
+                print(f"   Likely includes skull/face - HD-BET may have failed")
+                return None, None
+            
+            print(f"✅ Validation passed: {ratio:.1%} is within acceptable range (5-70%)")
+            print("="*60 + "\n")
+            
+            return brain_volume, brain_mask
+            
+    except subprocess.TimeoutExpired:
+        print(f"❌ HD-BET timed out after 5 minutes")
         return None, None
     except Exception as e:
-        print(f"⚠️ HD-BET failed: {e}")
-        if 'tmp_input_path' in locals() and os.path.exists(tmp_input_path):
-            os.unlink(tmp_input_path)
+        print(f"❌ HD-BET exception: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 def generate_brain_mask_otsu(volume: np.ndarray) -> np.ndarray:
@@ -880,25 +972,35 @@ def generate_brain_mask_otsu(volume: np.ndarray) -> np.ndarray:
         if brain_mask.sum() == 0:
             raise ValueError("Cannot generate brain mask - all thresholds failed")
     
-    # GOLD-STANDARD: NO EROSION - Preserve cortical geometry
+    # ENHANCED: NO EROSION in normal case, but AGGRESSIVE skull-stripping if needed
     # Step 1: Remove very small objects (noise, eyes, sinuses)
     brain_mask = remove_small_objects(brain_mask, min_size=10000)
     print(f"📊 After small object removal: {brain_mask.sum():,} voxels")
     
-    # Step 2: Keep largest connected component (main brain, NO erosion)
-    brain_mask = largest_connected_component(brain_mask)
-    print(f"📊 After largest component: {brain_mask.sum():,} voxels")
+    # Step 2: AGGRESSIVE EROSION for skull-stripping (removes face/skull)
+    # This is a FALLBACK when HD-BET is not available
+    # Larger erosion = more aggressive skull removal
+    brain_mask_eroded = binary_erosion(brain_mask, ball(5))  # Aggressive erosion
+    print(f"📊 After aggressive erosion: {brain_mask_eroded.sum():,} voxels")
     
-    # Step 3: Light closing ONLY (smooth boundaries, preserve gyri/sulci)
-    brain_mask = binary_closing(brain_mask, ball(2))
-    print(f"📊 After closing: {brain_mask.sum():,} voxels")
+    # Step 3: Keep largest connected component (main brain, NO face/skull)
+    brain_mask_eroded = largest_connected_component(brain_mask_eroded)
+    print(f"📊 After largest component: {brain_mask_eroded.sum():,} voxels")
     
-    # Step 4: Fill all holes inside brain
-    brain_mask = binary_fill_holes(brain_mask)
+    # Step 4: Dilate back to restore brain size (but not enough to add skull back)
+    brain_mask_final = binary_dilation(brain_mask_eroded, ball(4))  # Less dilation than erosion
+    print(f"📊 After dilation: {brain_mask_final.sum():,} voxels")
     
-    print(f"✅ Final brain mask: {brain_mask.sum():,} voxels (BRAIN TISSUE ONLY)")
+    # Step 5: Closing to smooth boundaries
+    brain_mask_final = binary_closing(brain_mask_final, ball(2))
+    print(f"📊 After closing: {brain_mask_final.sum():,} voxels")
     
-    return brain_mask.astype(np.uint8)
+    # Step 6: Fill all holes inside brain
+    brain_mask_final = binary_fill_holes(brain_mask_final)
+    
+    print(f"✅ Final brain mask: {brain_mask_final.sum():,} voxels (BRAIN TISSUE ONLY)")
+    
+    return brain_mask_final.astype(np.uint8)
 
 
 def compute_brain_bounding_box(brain_mask: np.ndarray, margin: int = 5) -> Tuple:
@@ -1099,61 +1201,50 @@ def create_3d_visualization(
     """
     fig = go.Figure()
     
-    # GOLD-STANDARD: HD-BET as PRIMARY brain extraction
-    # Otsu-based thresholding is NOT robust across MRI datasets
-    # HD-BET provides consistent, anatomically correct brain masks
+    print("\n" + "=" * 60)
+    print("🧠 BRAIN EXTRACTION PIPELINE")
+    print("=" * 60)
     
-    brain_mask_full = None
-    brain_bbox = None
+    # HD-BET ONLY - NO FALLBACK (Gold Standard)
+    print("\n🎯 Calling HD-BET (ONLY method - gold standard)...")
     
-    # STEP 1: Try HD-BET first (PRIMARY METHOD)
-    print("🎯 Attempting HD-BET brain extraction (primary method)...")
-    hdbet_mask, hdbet_bbox = apply_hdbet_preprocessing(original_volume, affine)
+    brain_volume, brain_mask = apply_hdbet_brain_extraction(original_volume, affine, spacing)
     
-    if hdbet_mask is not None and hdbet_bbox is not None and hdbet_mask.sum() > 10000:
-        # HD-BET SUCCESS - use it directly
-        print(f"✅ HD-BET: Successfully extracted brain ({hdbet_mask.sum():,} voxels)")
-        brain_mask_full = hdbet_mask
-        # HD-BET already computed bbox, but we need it for full volume
-        # So we compute bbox from the mask
-        brain_bbox = compute_brain_bounding_box(brain_mask_full, margin=5)
-        print(f"   Using HD-BET mask as primary brain extraction")
-        
-    else:
-        # HD-BET FAILED/UNAVAILABLE - fallback to Otsu
-        if HDBET_AVAILABLE:
-            print("⚠️ HD-BET: Extraction failed, falling back to Otsu")
-        else:
-            print("ℹ️ HD-BET: Not available, using Otsu fallback")
-        
-        # STEP 2: Fallback to Otsu-based brain mask
-        try:
-            with st.spinner("Generating brain mask (Otsu fallback)..."):
-                print("🔬 Starting Otsu brain mask generation...")
-                brain_mask_full = generate_brain_mask_otsu(original_volume)
-                print(f"✅ Otsu mask generated: {brain_mask_full.sum():,} voxels")
-            
-            # Compute brain bounding box
-            brain_bbox = compute_brain_bounding_box(brain_mask_full, margin=5)
-            
-        except Exception as e:
-            st.error(f"❌ Brain mask generation failed: {e}")
-            print(f"❌ Brain mask error: {e}")
-            brain_mask_full = None
-            brain_bbox = None
+    if brain_mask is None:
+        # HARD FAILURE - No fallback to heuristics
+        st.error(
+            "❌ **HD-BET Brain Extraction Failed**\n\n"
+            "3D brain surface rendering has been **disabled**.\n\n"
+            "**Why:** HD-BET is the ONLY clinically valid method for heterogeneous MRI data.\n"
+            "Heuristic methods (Otsu, morphology) cause face/skull artifacts.\n\n"
+            "**Most likely cause:** HD-BET model weights need to be downloaded.\n\n"
+            "**Solution:**\n"
+            "1. Download weights manually: https://zenodo.org/records/14445620\n"
+            "2. Extract `release_v1.5.0.zip`\n"
+            "3. Find HD-BET folder:\n"
+            "   ```\n"
+            "   py -c \"import HD_BET; import os; print(os.path.dirname(HD_BET.__file__))\"\n"
+            "   ```\n"
+            "4. Copy `.pkl` files to `[HD-BET folder]/parameters/`\n"
+            "5. Restart Streamlit\n\n"
+            "**Note:** Disease detection results are still valid."
+        )
+        print("❌ 3D RENDERING DISABLED - HD-BET REQUIRED (gold standard)")
+        print("=" * 60 + "\n")
+        return fig  # Return empty figure
     
-    # Rest of visualization (common path)
-    if brain_mask_full is not None and brain_bbox is not None:
-        bbox_shape = tuple(s.stop - s.start for s in brain_bbox)
-        print(f"📦 Bounding box: {bbox_shape} (cropped from {original_volume.shape})")
-        
-        # Crop volumes to brain region
-        brain_mask_cropped = brain_mask_full[brain_bbox]
-        original_cropped = original_volume[brain_bbox]
-        print(f"✂️ Cropped to brain region")
-    else:
-        st.error("❌ Could not generate brain mask")
-        brain_mask_cropped = None
+    print(f"✅ HD-BET SUCCESS: Brain extracted with {brain_mask.sum():,} voxels")
+    
+    # Compute bounding box from HD-BET mask
+    brain_bbox = compute_brain_bounding_box(brain_mask, margin=5)
+    bbox_shape = tuple(s.stop - s.start for s in brain_bbox)
+    print(f"📦 Bounding box: {bbox_shape} (from original {original_volume.shape})")
+    
+    # Crop to brain region
+    brain_mask_cropped = brain_mask[brain_bbox]
+    original_cropped = original_volume[brain_bbox]
+    print(f"✂️  Cropped to brain-only region")
+    print("=" * 60 + "\n")
     
     # LAYER 1: Patient-Specific Brain Surface (from mask, not MRI)
     if show_patient_brain and brain_mask_cropped is not None:
