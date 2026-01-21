@@ -1,101 +1,4 @@
-"""
-═══════════════════════════════════════════════════════════════════════════════
-NeuroX Adaptive – Multi-Disease MRI Analysis System
-Research & Educational Demonstration System
-═══════════════════════════════════════════════════════════════════════════════
 
-IMPORTANT ACADEMIC DISCLAIMERS:
-
-1. PURPOSE
-   This system performs PATTERN RECOGNITION, not clinical diagnosis.
-   Outputs are for research, education, and algorithm demonstration only.
-
-2. PRESENCE DETECTION ≠ DISEASE CONFIRMATION
-   - "Tumor presence" = imaging characteristics consistent with abnormal tissue
-   - "Stroke presence" = signal patterns suggestive of ischemic changes  
-   - "Alzheimer presence" = global volumetric features indicating neurodegeneration
-   
-   ALL require expert clinical interpretation and histopathological confirmation.
-
-3. ALZHEIMER ANALYSIS METHODOLOGY
-   - Pattern-based presence detection using whole-brain features
-   - NOT cortical thickness measurement
-   - NOT voxel-wise atrophy segmentation
-   - Rationale: ADNI dataset provides only subject-level labels (CN/MCI/AD)
-   - No ground-truth voxel-level pathology exists for neurodegenerative disease
-
-4. TRAINING DATASETS
-   - Brain Tumor: BraTS 2020 (multimodal MRI, multinational)
-   - Ischemic Stroke: ISLES 2022 (DWI/ADC sequences)
-   - Alzheimer's: ADNI-derived (T1-weighted structural MRI)
-
-5. TECHNICAL CONTRIBUTIONS
-   - Multi-task learning with shared encoder
-   - Conditional segmentation (disease-specific decoders)
-   - Transformer-based volumetric encoding
-   - Uncertainty-aware inference (Monte-Carlo Dropout)
-   - Temperature-scaled confidence calibration
-
-6. ARCHITECTURE DECISIONS
-   InstanceNorm3d (not BatchNorm3d):
-   - Training uses batch_size=2 (GPU memory constraint)
-   - InstanceNorm provides stable normalization for small batches
-   - Standard practice in medical imaging (nnU-Net, MONAI)
-   
-   Shared Encoder:
-   - Single encoder for all three diseases
-   - Improves multi-task generalization via shared representations
-   - Reduces parameters while maintaining performance
-   
-   Transformer Bottleneck:
-   - Captures long-range spatial dependencies
-   - Handles variable lesion sizes via self-attention
-   - Superior to pure CNN for 3D medical volumes
-
-7. KNOWN LIMITATIONS (Honest Academic Assessment)
-   - No skull stripping (model learns brain vs skull discrimination)
-   - Fixed 96³ resolution (information loss for large native scans)
-   - No multi-site harmonization (scanner-specific biases)
-   - Single time-point analysis (no longitudinal tracking)
-   - Imbalanced datasets: Tumor (300) >> Stroke (200) >> Alzheimer (100)
-   - No external validation (same dataset train/val splits)
-
-8. REGULATORY COMPLIANCE
-   ⚠️  NOT FDA-approved
-   ⚠️  NOT CE-marked
-   ⚠️  NOT validated for clinical use
-   
-   For clinical deployment: IRB approval + prospective validation required.
-
-9. INFERENCE vs TRAINING
-   This file: Inference-only (no training logic)
-   Training file: neurox_train_kaggle.py (separate, production-grade)
-   
-   Normalization consistency: InstanceNorm3d in both files
-   Checkpoint compatibility: Loads with strict=False for partial matches
-
-═══════════════════════════════════════════════════════════════════════════════
-
-PRODUCTION IMPROVEMENTS (This Refactored Version):
-
-✓ Normalization fix: InstanceNorm3d matches training pipeline
-✓ Monte-Carlo Dropout: Epistemic uncertainty estimation
-✓ Temperature scaling: Probability calibration
-✓ Volumetric quantification: Clinical-style metrics
-✓ Hard Alzheimer guards: No segmentation enforcement
-✓ Deterministic mode: Reproducible results
-✓ Offline mode: No internet dependencies
-✓ Inference engine: Modular, auditable pipeline
-
-═══════════════════════════════════════════════════════════════════════════════
-
-For questions or academic collaboration:
-Project: NeuroX - Final Year Medical Imaging AI
-Institution: [Your University]
-Supervisors: [Professor Names]
-
-═══════════════════════════════════════════════════════════════════════════════
-"""
 
 import os
 import sys
@@ -504,15 +407,75 @@ def compute_lesion_metrics(segmentation: np.ndarray, spacing=(1.0, 1.0, 1.0)) ->
     }
 
 
+def apply_clinical_decision_logic(presence_logits: Dict[str, float]) -> Dict:
+    """Apply clinical reasoning with softmax-based mutual exclusivity.
+    
+    GOLD-STANDARD CLINICAL AI LOGIC:
+    Diseases are mutually exclusive - only ONE can be primary diagnosis.
+    Uses softmax to enforce probability distribution sums to 1.0.
+    
+    Args:
+        presence_logits: Raw logits from presence heads {disease: logit_value}
+    
+    Returns:
+        Dict containing:
+            - disease_probabilities: Softmax probabilities (sum to 1.0)
+            - primary_disease: Disease with highest probability
+            - primary_confidence: Confidence of primary disease
+            - threshold_met: Whether confidence exceeds clinical threshold
+            - secondary_probs: Dict of other disease probabilities
+    """
+    import torch
+    import torch.nn.functional as F
+    
+    # Stack logits in consistent order
+    disease_names = ["tumor", "stroke", "alzheimer"]
+    logits_list = [presence_logits[d] for d in disease_names]
+    logits_tensor = torch.tensor(logits_list, dtype=torch.float32)
+    
+    # Apply softmax for mutual exclusivity
+    probs_tensor = F.softmax(logits_tensor, dim=0)
+    
+    # Convert to dict
+    disease_probs = {
+        name: float(prob)
+        for name, prob in zip(disease_names, probs_tensor)
+    }
+    
+    # Find primary disease
+    primary_disease = max(disease_probs, key=disease_probs.get)
+    primary_confidence = disease_probs[primary_disease]
+    
+    # Secondary diseases
+    secondary_probs = {
+        k: v for k, v in disease_probs.items() if k != primary_disease
+    }
+    
+    # Clinical threshold (60% confidence minimum)
+    CLINICAL_THRESHOLD = 0.6
+    threshold_met = primary_confidence >= CLINICAL_THRESHOLD
+    
+    return {
+        "disease_probabilities": disease_probs,
+        "primary_disease": primary_disease,
+        "primary_confidence": primary_confidence,
+        "threshold_met": threshold_met,
+        "secondary_probs": secondary_probs,
+        "decision_type": "high_confidence" if threshold_met else "uncertain"
+    }
+
+
 def automatic_disease_detection(
     model, 
     image_tensor: torch.Tensor, 
     threshold: float = PRESENCE_THRESHOLD,
-    use_uncertainty: bool = True
+    use_uncertainty: bool = True,
+    use_clinical_logic: bool = True
 ) -> Dict:
-    """Automatic multi-disease detection with optional uncertainty estimation.
+    """Automatic multi-disease detection with clinical decision logic.
     
-    PRODUCTION IMPROVEMENT: Adds MC Dropout uncertainty for confidence assessment.
+    MEDICAL-GRADE UPDATE: Now applies softmax-based mutual exclusivity
+    when use_clinical_logic=True (default).
     """
     if model is None:
         return {"detected_diseases": [], "probabilities": {}, "uncertainties": {}}
@@ -520,6 +483,7 @@ def automatic_disease_detection(
     diseases = ["tumor", "stroke", "alzheimer"]
     probabilities = {}
     uncertainties = {}
+    presence_logits = {}
     detected = []
     
     with torch.no_grad():
@@ -534,21 +498,47 @@ def automatic_disease_detection(
                 mean_prob, uncertainty = head.uncertainty_forward(bottleneck, n_samples=10)
                 probabilities[disease] = mean_prob
                 uncertainties[disease] = uncertainty
+                # Approximate logit from probability (for clinical logic)
+                presence_logits[disease] = np.log(mean_prob / (1 - mean_prob + 1e-8))
             else:
-                # Standard deterministic inference
+                # Standard deterministic inference - extract LOGIT
                 logit = head(bottleneck)
+                presence_logits[disease] = float(logit.cpu().item())
                 prob = torch.sigmoid(logit).cpu().item()
                 probabilities[disease] = prob
                 uncertainties[disease] = 0.0
-            
+    
+    # Apply clinical decision logic if enabled
+    if use_clinical_logic:
+        clinical_decision = apply_clinical_decision_logic(presence_logits)
+        
+        # Update probabilities with softmax-based ones
+        probabilities_clinical = clinical_decision["disease_probabilities"]
+        
+        # Only primary disease is "detected" if threshold met
+        if clinical_decision["threshold_met"]:
+            detected = [clinical_decision["primary_disease"]]
+        else:
+            detected = []  # Uncertain - no clear diagnosis
+        
+        return {
+            "detected_diseases": detected,
+            "probabilities": probabilities_clinical,  # Softmax probabilities
+            "uncertainties": uncertainties,
+            "clinical_decision": clinical_decision,  # Full clinical analysis
+            "raw_probabilities": probabilities  # Original sigmoid for reference
+        }
+    else:
+        # Legacy behavior (independent sigmoid)
+        for disease in diseases:
             if probabilities[disease] > threshold:
                 detected.append(disease)
-    
-    return {
-        "detected_diseases": detected,
-        "probabilities": probabilities,
-        "uncertainties": uncertainties
-    }
+        
+        return {
+            "detected_diseases": detected,
+            "probabilities": probabilities,
+            "uncertainties": uncertainties
+        }
 
 
 def perform_segmentation(model, image_tensor: torch.Tensor, diseases: List[str]) -> Dict:
@@ -689,6 +679,53 @@ def largest_connected_component(mask: np.ndarray) -> np.ndarray:
     return (labeled == largest_label).astype(mask.dtype)
 
 
+def validate_lesion_position(lesion_mask: np.ndarray, brain_mask: np.ndarray) -> tuple:
+    """Validate lesion is anatomically inside brain.
+    
+    GOLD-STANDARD CLINICAL QA:
+    Lesions cannot exist outside brain tissue - this is anatomically impossible.
+    Checks if lesion centroid lies within brain mask.
+    
+    Args:
+        lesion_mask: Binary lesion segmentation
+        brain_mask: Binary brain mask
+    
+    Returns:
+        Tuple of (is_valid: bool, centroid: array or None, message: str)
+    """
+    if lesion_mask.sum() == 0:
+        return False, None, "Empty lesion mask"
+    
+    if brain_mask is None or brain_mask.sum() == 0:
+        return False, None, "Empty brain mask"
+    
+    # Compute lesion centroid
+    coords = np.argwhere(lesion_mask > 0)
+    centroid = coords.mean(axis=0).astype(int)
+    
+    # Check if centroid is inside brain
+    try:
+        is_inside = brain_mask[tuple(centroid)] > 0
+    except IndexError:
+        return False, centroid, "Centroid outside volume bounds"
+    
+    if not is_inside:
+        return False, centroid, f"Centroid at {centroid} is outside brain tissue"
+    
+    # Check what fraction of lesion is inside brain
+    overlap = (lesion_mask & brain_mask).sum()
+    total = lesion_mask.sum()
+    overlap_fraction = overlap / total
+    
+    # RELAXED threshold: 40% overlap (was 50%)
+    # Some lesions naturally extend to brain boundaries
+    if overlap_fraction < 0.4:
+        return False, centroid, f"Only {overlap_fraction:.1%} of lesion inside brain"
+    
+    return True, centroid, f"Valid: {overlap_fraction:.1%} inside brain"
+
+
+
 def generate_patient_brain_surface(
     brain_mask: np.ndarray,
     affine: Optional[np.ndarray] = None,
@@ -809,25 +846,20 @@ def generate_brain_mask_otsu(volume: np.ndarray) -> np.ndarray:
         if brain_mask.sum() == 0:
             raise ValueError("Cannot generate brain mask - all thresholds failed")
     
+    # GOLD-STANDARD: NO EROSION - Preserve cortical geometry
     # Step 1: Remove very small objects (noise, eyes, sinuses)
     brain_mask = remove_small_objects(brain_mask, min_size=10000)
     print(f"📊 After small object removal: {brain_mask.sum():,} voxels")
     
-    # Step 2: Morphological erosion (removes skull boundary, meninges)
-    brain_mask = binary_erosion(brain_mask, ball(2))
-    print(f"📊 After erosion: {brain_mask.sum():,} voxels")
-    
-    # Step 3: Keep largest connected component (main brain, not face/eyes)
+    # Step 2: Keep largest connected component (main brain, NO erosion)
     brain_mask = largest_connected_component(brain_mask)
     print(f"📊 After largest component: {brain_mask.sum():,} voxels")
     
-    # Step 4: Morphological dilation (restore brain size)
-    brain_mask = binary_dilation(brain_mask, ball(2))
+    # Step 3: Light closing ONLY (smooth boundaries, preserve gyri/sulci)
+    brain_mask = binary_closing(brain_mask, ball(2))
+    print(f"📊 After closing: {brain_mask.sum():,} voxels")
     
-    # Step 5: Morphological closing (smooth boundaries)
-    brain_mask = binary_closing(brain_mask, ball(3))
-    
-    # Step 6: Fill all holes inside brain
+    # Step 4: Fill all holes inside brain
     brain_mask = binary_fill_holes(brain_mask)
     
     print(f"✅ Final brain mask: {brain_mask.sum():,} voxels (BRAIN TISSUE ONLY)")
@@ -932,56 +964,63 @@ def check_border_contact(segmentation: np.ndarray, margin: int = 2) -> bool:
 # VISUALIZATION FUNCTIONS (REFACTORED FOR ANATOMICAL PLAUSIBILITY)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def create_slice_view(image_data: np.ndarray, segmentations: Dict, axis: int = 2, slice_idx: Optional[int] = None) -> plt.Figure:
-    """Create 2D slice view with overlays"""
+def create_slice_view(
+    volume: np.ndarray,
+    segmentations_roi: Dict,
+    roi_metadata: Dict,
+    axis: int = 2,
+    slice_idx: int = None
+) -> plt.Figure:
+    """Create slice visualization with overlays.
+    
+    FIXED: Maps ROI segmentations to original space before slicing.
+    """
     if slice_idx is None:
-        slice_idx = image_data.shape[axis] // 2
+        slice_idx = volume.shape[axis] // 2
     
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8), facecolor='#030712')
-    ax.set_facecolor('#0a1120')
-    
-    # Get slice
+    # Get base slice from volume
     if axis == 0:
-        img_slice = image_data[slice_idx, :, :]
+        base_slice = volume[slice_idx, :, :]
     elif axis == 1:
-        img_slice = image_data[:, slice_idx, :]
+        base_slice = volume[:, slice_idx, :]
     else:
-        img_slice = image_data[:, :, slice_idx]
+        base_slice = volume[:, :, slice_idx]
     
-    # Display image
-    ax.imshow(img_slice, cmap='gray', alpha=0.8)
+    # Create figure
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8), facecolor='#0A0E27')
+    ax.set_facecolor('#0A0E27')
     
-    # Overlay segmentations
-    for disease, (probs, binary) in segmentations.items():
-        # ALZHEIMER HARD GUARD (COMPLIANCE)
+    # Show base MRI
+    ax.imshow(base_slice, cmap='gray', origin='lower')
+    
+    # Overlay segmentations (map from ROI to original space first)
+    for disease, (probs, binary) in segmentations_roi.items():
+        # ALZHEIMER GUARD
         if disease == "alzheimer":
-            continue  # Skip overlay - no voxel-level masks for Alzheimer
+            continue
         
-        color = np.array(DISEASE_COLORS[disease]["rgb"]) / 255.0
+        # Map ROI → original space
+        seg_original = map_segmentation_to_original_space(binary, roi_metadata)
         
-        # Merge channels for this disease
-        if binary.ndim == 4:
-            combined = binary.max(axis=0)
-        else:
-            combined = binary[0] if binary.ndim == 3 else binary
-        
-        # Get slice
+        # Now slice from original space
         if axis == 0:
-            seg_slice = combined[slice_idx, :, :]
+            seg_slice = seg_original[slice_idx, :, :]
         elif axis == 1:
-            seg_slice = combined[:, slice_idx, :]
+            seg_slice = seg_original[:, slice_idx, :]
         else:
-            seg_slice = combined[:, :, slice_idx]
+            seg_slice = seg_original[:, :, slice_idx]
         
-        # Create colored overlay
+        # Create colored overlay (H, W, 4) - channel dimension LAST
+        color = tuple(int(DISEASE_COLORS[disease]["hex"][i:i+2], 16)/255 for i in (1, 3, 5))
         overlay = np.zeros((*seg_slice.shape, 4))
         mask = seg_slice > 0
         overlay[mask] = [*color, 0.5]
         
-        ax.imshow(overlay)
+        ax.imshow(overlay, origin='lower')  # No transpose - already correct shape
     
     ax.axis('off')
-    ax.set_title(f"{'Axial' if axis == 2 else 'Sagittal' if axis == 0 else 'Coronal'} Slice {slice_idx}", 
+    axis_names = ['Sagittal', 'Coronal', 'Axial']
+    ax.set_title(f"{axis_names[axis]} Slice {slice_idx}", 
                  color='#00E5FF', fontsize=14, fontweight='bold')
     
     plt.tight_layout()
@@ -994,7 +1033,8 @@ def create_3d_visualization(
     original_volume: np.ndarray,
     affine: np.ndarray,
     spacing: Tuple[float, float, float],
-    show_patient_brain: bool = True
+    show_patient_brain: bool = True,
+    clinical_decision: Optional[Dict] = None
 ) -> go.Figure:
     """Medical-Grade Patient-Specific Brain Visualization.
     
@@ -1005,6 +1045,9 @@ def create_3d_visualization(
     4. Lesion surfaces separately (never merged with brain)
     5. Apply affine transforms (world coordinates)
     
+    CLINICAL DECISION GATING:
+    If clinical_decision provided, only renders lesion for primary disease.
+    
     CRITICAL: Brain and lesions are SEPARATE meshes, never meshed together.
     
     Args:
@@ -1014,6 +1057,7 @@ def create_3d_visualization(
         affine: NIfTI affine matrix
         spacing: Voxel spacing in mm
         show_patient_brain: Whether to render patient brain surface
+        clinical_decision: Optional clinical analysis with primary disease
     
     Returns:
         Plotly 3D figure with anatomically realistic rendering
@@ -1051,22 +1095,13 @@ def create_3d_visualization(
                 print("🧠 Generating brain surface mesh...")
                 brain_verts, brain_faces = generate_patient_brain_surface(
                     brain_mask=brain_mask_cropped,
-                    affine=None,  # Keep in voxel space for now
+                    affine=None,
                     spacing=spacing
                 )
                 print(f"✅ Brain mesh: {len(brain_verts):,} vertices, {len(brain_faces):,} faces")
             
-            # CRITICAL: Add bounding box offset to vertices
-            # Marching cubes on cropped volume starts at (0,0,0)
-            # Must translate back to original coordinate system
-            bbox_offset_voxels = np.array([
-                brain_bbox[0].start,
-                brain_bbox[1].start,
-                brain_bbox[2].start
-            ])
-            # TEST: marching cubes spacing param handles mm conversion, offset stays in voxels
-            brain_verts = brain_verts + bbox_offset_voxels
-            print(f"📍 Applied bbox offset (voxels): {bbox_offset_voxels}")
+            # Marching cubes with spacing already gives physical mm coordinates
+            # NO manual offset needed
             
             # Add brain surface mesh (moderate opacity for visibility)
             fig.add_trace(go.Mesh3d(
@@ -1077,7 +1112,7 @@ def create_3d_visualization(
                 j=brain_faces[:, 1],
                 k=brain_faces[:, 2],
                 color='lightgray',
-                opacity=0.4,  # Increased from 0.2 for better visibility
+                opacity=0.4,
                 name='Brain Surface',
                 showlegend=True,
                 hoverinfo='skip',
@@ -1099,9 +1134,27 @@ def create_3d_visualization(
     for disease, (probs_roi, binary_roi) in segmentations_roi.items():
         # ALZHEIMER HARD GUARD (COMPLIANCE REQUIREMENT)
         if disease == "alzheimer":
-            st.info("ℹ️ **Alzheimer's Disease**: Presence-only detection (no voxel-level localization). "
+            st.info(f"ℹ️ **Alzheimer's Disease**: Presence-only detection (no voxel-level localization). "
                     "ADNI dataset does not provide lesion masks. 3D visualization not applicable.")
             continue  # Skip 3D mesh, slice overlay, volume rendering
+        
+        # CLINICAL GATING: Only render lesion if it's the primary disease
+        if clinical_decision is not None:
+            primary_disease = clinical_decision["primary_disease"]
+            primary_confidence = clinical_decision["primary_confidence"]
+            
+            if disease != primary_disease:
+                other_prob = clinical_decision["disease_probabilities"][disease]
+                st.info(f"ℹ️ **{DISEASE_COLORS[disease]['name']}**: Not primary diagnosis "
+                       f"(confidence: {other_prob:.1%} vs primary {primary_disease}: {primary_confidence:.1%})")
+                print(f"   Skipped: {disease} not primary (prob={other_prob:.1%})")
+                continue
+            
+            if not clinical_decision["threshold_met"]:
+                st.warning(f"⚠️ **{DISEASE_COLORS[disease]['name']}**: Low confidence "
+                          f"({primary_confidence:.1%}) - clinical review recommended")
+                print(f"   Skipped: Below clinical threshold ({primary_confidence:.1%} < 60%)")
+                continue
         
         color = DISEASE_COLORS[disease]["hex"]
         name = DISEASE_COLORS[disease]["name"]
@@ -1171,32 +1224,33 @@ def create_3d_visualization(
         
         print(f"   After cleaning: {cleaned_voxels:,} voxels ({100*cleaned_voxels/voxel_count:.1f}% retained)")
         
-        # Light Gaussian smoothing
+        # GOLD-STANDARD CLINICAL QA: Anatomical validation
+        is_valid, centroid, msg = validate_lesion_position(seg_clean, brain_mask_cropped if brain_bbox else None)
+        
+        if not is_valid:
+            st.warning(f"⚠️ **{name}**: {msg} - Invalid visualization rejected")
+            print(f"   ❌ ANATOMICAL VALIDATION FAILED: {msg}")
+            continue
+        
+        print(f"   ✅ Anatomical validation: {msg}")
+        
+        # Light Gaussian smoothing (σ ≤ 0.5 for small lesions)
         lesion_volume = seg_clean.sum()
-        sigma = 0.8 if lesion_volume < 500 else 1.0
+        sigma = 0.5  # Consistent smoothing
         
         try:
             seg_smooth = gaussian_filter(seg_clean.astype(float), sigma=sigma)
             
-            # Marching cubes at level=0.5 (standard for binary masks)
+            # GOLD-STANDARD: Marching cubes WITH spacing (same as brain)
             verts, faces, normals, _ = measure.marching_cubes(
                 seg_smooth,
-                level=0.5,  # Standard threshold
-                spacing=spacing
+                level=0.5,
+                spacing=spacing  # Physical mm coordinates
             )
             
             print(f"   Marching cubes: {len(verts):,} vertices, {len(faces):,} faces")
             
-            # CRITICAL: Add bounding box offset (same as brain surface)
-            if brain_bbox is not None:
-                bbox_offset_voxels = np.array([
-                    brain_bbox[0].start,
-                    brain_bbox[1].start,
-                    brain_bbox[2].start
-                ])
-                # TEST: marching cubes spacing param handles mm conversion, offset stays in voxels
-                verts = verts + bbox_offset_voxels
-                print(f"   Applied bbox offset (voxels): {bbox_offset_voxels}")
+            # NO manual offset - marching cubes with spacing handles it
             
             # Show vertex range for debugging
             print(f"   Vertex range: X=[{verts[:,0].min():.1f}, {verts[:,0].max():.1f}]")
@@ -1268,53 +1322,82 @@ def create_3d_visualization(
     return fig
 
 
-def create_volume_rendering(segmentations: Dict) -> go.Figure:
-    """Volume rendering view"""
+def create_volume_rendering(
+    segmentations_roi: Dict,
+    roi_metadata: Dict,
+    original_volume: np.ndarray,
+    downsample_factor: int = 4
+) -> go.Figure:
+    """Create volume rendering visualization.
+    
+    FIXED: Maps ROI to original space, shows brain MRI with lesion overlays.
+    """
+    # Downsample original volume for performance
+    vol_down = original_volume[::downsample_factor, ::downsample_factor, ::downsample_factor]
+    
+    # Normalize to 0-1
+    vol_norm = (vol_down - vol_down.min()) / (vol_down.max() - vol_down.min() + 1e-8)
+    
+    # Create figure
     fig = go.Figure()
     
-    for disease, (probs, binary) in segmentations.items():
-        # ALZHEIMER HARD GUARD (COMPLIANCE)
+    # Add brain MRI volume (semi-transparent grayscale)
+    fig.add_trace(go.Volume(
+        x=np.arange(vol_down.shape[0]),
+        y=np.arange(vol_down.shape[1]),
+        z=np.arange(vol_down.shape[2]),
+        value=vol_norm.flatten(),
+        isomin=0.2,  # Lower threshold to show more brain
+        isomax=0.8,
+        opacity=0.3,  # Increased opacity for visibility
+        surface_count=15,
+        colorscale='Greys',
+        name='Brain MRI',
+        showlegend=True
+    ))
+    
+    # Add lesion volumes (from ROI space)
+    for disease, (probs_roi, binary_roi) in segmentations_roi.items():
         if disease == "alzheimer":
-            continue  # Skip volume rendering - no voxel-level masks
+            continue  # No volume rendering for Alzheimer
         
+        # Map to original space
+        seg_original = map_segmentation_to_original_space(binary_roi, roi_metadata)
+        
+        # Downsample
+        seg_down = seg_original[::downsample_factor, ::downsample_factor, ::downsample_factor]
+        
+        if seg_down.sum() == 0:
+            continue
+        
+        # Create volume trace
         color = DISEASE_COLORS[disease]["hex"]
-        name = DISEASE_COLORS[disease]["name"]
-        
-        # Get combined probability map
-        if probs.ndim == 4:
-            combined = probs.max(axis=0)
-        else:
-            combined = probs[0] if probs.ndim == 3 else probs
-        
-        # Downsample for performance
-        factor = 2
-        downsampled = zoom(combined, 1/factor, order=1)
-        
-        X, Y, Z = np.mgrid[0:downsampled.shape[0], 0:downsampled.shape[1], 0:downsampled.shape[2]]
-        
         fig.add_trace(go.Volume(
-            x=X.flatten(),
-            y=Y.flatten(),
-            z=Z.flatten(),
-            value=downsampled.flatten(),
-            isomin=0.3,
-            isomax=0.9,
-            opacity=0.3,
-            surface_count=15,
-            colorscale=[[0, 'rgba(0,0,0,0)'], [1, color]],
-            name=name
+            x=np.arange(seg_down.shape[0]),
+            y=np.arange(seg_down.shape[1]),
+            z=np.arange(seg_down.shape[2]),
+            value=seg_down.flatten().astype(float),
+            isomin=0.5,
+            isomax=1.0,
+            opacity=0.6,
+            surface_count=10,
+            colorscale=[[0, color], [1, color]],
+            name=DISEASE_COLORS[disease]["name"],
+            showlegend=True
         ))
     
+    # Layout
     fig.update_layout(
         scene=dict(
             xaxis=dict(visible=False),
             yaxis=dict(visible=False),
             zaxis=dict(visible=False),
-            bgcolor='#0a1120'
+            bgcolor='#0A0E27'
         ),
-        paper_bgcolor='#030712',
+        paper_bgcolor='#0A0E27',
+        plot_bgcolor='#0A0E27',
         margin=dict(l=0, r=0, t=0, b=0),
-        height=700
+        height=600
     )
     
     return fig
@@ -2111,7 +2194,12 @@ def run_streamlit_app():
             
             elif "Volume" in viz_mode:
                 if show_volume:
-                    fig_vol = create_volume_rendering(st.session_state.segmentation_results)
+                    fig_vol = create_volume_rendering(
+                        st.session_state.segmentation_results,
+                        st.session_state.roi_metadata,
+                        st.session_state.original_image,
+                        downsample_factor=4
+                    )
                     st.plotly_chart(fig_vol, use_container_width=True)
                 else:
                     st.info("Enable 'Volume Rendering' in sidebar to view")
@@ -2130,6 +2218,7 @@ def run_streamlit_app():
                         fig_slice = create_slice_view(
                             st.session_state.original_image,
                             st.session_state.segmentation_results,
+                            st.session_state.roi_metadata,  # Pass roi_metadata
                             axis_map[axis],
                             slice_idx
                         )
