@@ -93,7 +93,7 @@ TRAINING_PHASES = [
         "name": "Phase 1: Brain Tumor Detection",
         "dataset_type": "tumor",
         "dataset_path": "/kaggle/input/brats20-dataset-training-validation/",
-        "epochs": 3,
+        "epochs": 50,
         "freeze_encoder": False,
         "has_segmentation": True
     },
@@ -101,7 +101,7 @@ TRAINING_PHASES = [
         "name": "Phase 2: Ischemic Stroke Detection",
         "dataset_type": "stroke",
         "dataset_path": "/kaggle/input/isles-2022-brain-stoke-dataset/",
-        "epochs": 3,
+        "epochs": 55,
         "freeze_encoder": "partial",
         "has_segmentation": True
     },
@@ -109,7 +109,7 @@ TRAINING_PHASES = [
         "name": "Phase 3: Alzheimer's Presence Detection",
         "dataset_type": "alzheimer",
         "dataset_path": "/kaggle/input/new-3d-mri-alzheimer/",
-        "epochs": 3,
+        "epochs": 56,
         "freeze_encoder": True,
         "has_segmentation": False  # CRITICAL: No segmentation for Alzheimer
     }

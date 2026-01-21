@@ -39,6 +39,14 @@ except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
 
+# HD-BET for Robust Brain Extraction
+try:
+    from HD_BET.run import run_hd_bet
+    HDBET_AVAILABLE = True
+except ImportError:
+    HDBET_AVAILABLE = False
+    run_hd_bet = None
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PRODUCTION CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════
@@ -699,18 +707,9 @@ def validate_lesion_position(lesion_mask: np.ndarray, brain_mask: np.ndarray) ->
     if brain_mask is None or brain_mask.sum() == 0:
         return False, None, "Empty brain mask"
     
-    # Compute lesion centroid
+    # Compute lesion centroid for reporting
     coords = np.argwhere(lesion_mask > 0)
     centroid = coords.mean(axis=0).astype(int)
-    
-    # Check if centroid is inside brain
-    try:
-        is_inside = brain_mask[tuple(centroid)] > 0
-    except IndexError:
-        return False, centroid, "Centroid outside volume bounds"
-    
-    if not is_inside:
-        return False, centroid, f"Centroid at {centroid} is outside brain tissue"
     
     # Check what fraction of lesion is inside brain
     overlap = (lesion_mask & brain_mask).sum()
@@ -780,6 +779,41 @@ def generate_patient_brain_surface(
 # ═══════════════════════════════════════════════════════════════════════════
 # MORPHOLOGICAL CLEANING & ANATOMICAL POST-PROCESSING
 # ═══════════════════════════════════════════════════════════════════════════
+
+def apply_hdbet_preprocessing(volume: np.ndarray, affine: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[Tuple]]:
+    """Apply HD-BET for robust brain extraction preprocessing."""
+    if not HDBET_AVAILABLE:
+        return None, None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as tmp_input:
+            tmp_input_path = tmp_input.name
+            nib.save(nib.Nifti1Image(volume, affine), tmp_input_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_hd_bet(tmp_input_path, tmp_dir, mode='fast', 
+                      device='cpu' if not torch.cuda.is_available() else 'cuda',
+                      postprocess=False, do_tta=False)
+            mask_path = Path(tmp_dir) / f"{Path(tmp_input_path).stem}_mask.nii.gz"
+            if mask_path.exists():
+                brain_mask = nib.load(str(mask_path)).get_fdata() > 0
+                coords = np.argwhere(brain_mask > 0)
+                if len(coords) > 0:
+                    min_coords = coords.min(axis=0)
+                    max_coords = coords.max(axis=0)
+                    margin = 5
+                    shape = brain_mask.shape
+                    bbox = tuple([slice(max(0, min_coords[i] - margin), 
+                                       min(shape[i], max_coords[i] + margin + 1))
+                                 for i in range(3)])
+                    os.unlink(tmp_input_path)
+                    return brain_mask, bbox
+        if os.path.exists(tmp_input_path):
+            os.unlink(tmp_input_path)
+        return None, None
+    except Exception as e:
+        print(f"⚠️ HD-BET failed: {e}")
+        if 'tmp_input_path' in locals() and os.path.exists(tmp_input_path):
+            os.unlink(tmp_input_path)
+        return None, None
 
 def generate_brain_mask_otsu(volume: np.ndarray) -> np.ndarray:
     """Generate brain tissue mask (BRAIN ONLY, no skull/scalp).
@@ -1034,7 +1068,8 @@ def create_3d_visualization(
     affine: np.ndarray,
     spacing: Tuple[float, float, float],
     show_patient_brain: bool = True,
-    clinical_decision: Optional[Dict] = None
+    clinical_decision: Optional[Dict] = None,
+    show_heatmap: bool = False
 ) -> go.Figure:
     """Medical-Grade Patient-Specific Brain Visualization.
     
@@ -1064,20 +1099,39 @@ def create_3d_visualization(
     """
     fig = go.Figure()
     
-    # STEP 1: Generate brain mask using Otsu (medical-grade)
+    # STEP 1: HD-BET Preprocessing (if available)
+    hdbet_mask, hdbet_bbox = apply_hdbet_preprocessing(original_volume, affine)
+    
+    if hdbet_mask is not None and hdbet_bbox is not None:
+        print("🎯 HD-BET: Brain region detected")
+        # Crop to HD-BET bounding box
+        volume_for_otsu = original_volume[hdbet_bbox]
+        print(f"   Cropped to brain region: {volume_for_otsu.shape}")
+        use_hdbet = True
+    else:
+        if HDBET_AVAILABLE:
+            print("⚠️ HD-BET: Failed, using fallback")
+        else:
+            print("ℹ️ HD-BET: Not available, using Otsu only")
+        # Use full volume
+        volume_for_otsu = original_volume
+        hdbet_bbox = None
+        use_hdbet = False
+    
+    # STEP 2: Generate brain mask using Otsu (existing pipeline)
     try:
-        with st.spinner("Generating brain mask (Otsu thresholding)..."):
+        with st.spinner("Generating brain mask..."):
             print("🔬 Starting Otsu brain mask generation...")
-            brain_mask = generate_brain_mask_otsu(original_volume)
-            print(f"✅ Brain mask generated: {brain_mask.sum():,} voxels")
+            brain_mask_full = generate_brain_mask_otsu(volume_for_otsu)
+            print(f"✅ Brain mask generated: {brain_mask_full.sum():,} voxels")
         
         # Compute brain bounding box (crop to brain region)
-        brain_bbox = compute_brain_bounding_box(brain_mask, margin=5)
+        brain_bbox = compute_brain_bounding_box(brain_mask_full, margin=5)
         bbox_shape = tuple(s.stop - s.start for s in brain_bbox)
         print(f"📦 Bounding box: {bbox_shape} (cropped from {original_volume.shape})")
         
         # Crop volumes to brain region (NEVER visualize full cube)
-        brain_mask_cropped = brain_mask[brain_bbox]
+        brain_mask_cropped = brain_mask_full[brain_bbox]
         original_cropped = original_volume[brain_bbox]
         print(f"✂️ Cropped to brain region")
         
@@ -1257,23 +1311,59 @@ def create_3d_visualization(
             print(f"                 Y=[{verts[:,1].min():.1f}, {verts[:,1].max():.1f}]")
             print(f"                 Z=[{verts[:,2].min():.1f}, {verts[:,2].max():.1f}]")
             
-            # Render lesion (high opacity, disease color)
-            fig.add_trace(go.Mesh3d(
-                x=verts[:, 0],
-                y=verts[:, 1],
-                z=verts[:, 2],
-                i=faces[:, 0],
-                j=faces[:, 1],
-                k=faces[:, 2],
-                color=color,
-                opacity=0.9,  # High opacity for lesion
-                name=f"{name} ({voxel_count} voxels)",
-                showlegend=True,
-                lighting=dict(ambient=0.5, diffuse=0.7, specular=0.4),
-                lightposition=dict(x=100, y=200, z=300)
-            ))
+            # Prepare mesh coloring
+            if show_heatmap:
+                # Heatmap: sample probability values at vertex locations
+                # Interpolate probability values at mesh vertices
+                from scipy.ndimage import map_coordinates
+                
+                # Verts are in mm, need to convert to voxel coords for sampling
+                verts_voxel = verts / np.array(spacing)
+                
+                # Sample probabilities at vertex locations
+                vertex_probs = map_coordinates(
+                    probs_roi[0] if probs_roi.ndim == 4 else probs_roi,
+                    verts_voxel.T,
+                    order=1,
+                    mode='nearest'
+                )
+                
+                # Add heatmap mesh with probability-based coloring
+                fig.add_trace(go.Mesh3d(
+                    x=verts[:, 0],
+                    y=verts[:, 1],
+                    z=verts[:, 2],
+                    i=faces[:, 0],
+                    j=faces[:, 1],
+                    k=faces[:, 2],
+                    intensity=vertex_probs,
+                    colorscale='Hot',  # Red-yellow heatmap
+                    opacity=0.95,
+                    name=f"{name} Heatmap ({cleaned_voxels} voxels)",
+                    showlegend=True,
+                    hoverinfo='text',
+                    hovertext=[f"Probability: {p:.2f}" for p in vertex_probs],
+                    lighting=dict(ambient=0.7, diffuse=0.8),
+                    colorbar=dict(title="Probability", x=1.0)
+                ))
+            else:
+                # Solid color mesh
+                fig.add_trace(go.Mesh3d(
+                    x=verts[:, 0],
+                    y=verts[:, 1],
+                    z=verts[:, 2],
+                    i=faces[:, 0],
+                    j=faces[:, 1],
+                    k=faces[:, 2],
+                    color=color,
+                    opacity=0.9,
+                    name=f"{name} ({cleaned_voxels} voxels)",
+                    showlegend=True,
+                    hoverinfo='name',
+                    lighting=dict(ambient=0.7, diffuse=0.8)
+                ))
             
-            print(f"   ✅ {name} mesh added to scene")
+            print(f"   ✅ {name} mesh added to scene ({'heatmap' if show_heatmap else 'solid color'})")
             
         except (ValueError, RuntimeError) as e:
             st.warning(f"⚠️ **{name}**: Mesh generation failed - {str(e)}")
@@ -1988,12 +2078,13 @@ def run_streamlit_app():
         groq_key = st.text_input("Groq API Key (Optional)", type="password", 
                                   help="Enable AI-powered reports")
         
-        st.markdown("---")
-        st.markdown("### 🎨 Visualization Options")
-        show_atlas = st.checkbox("Show Brain Surface (Patient-Specific)", value=True)
-        show_volume = st.checkbox("Volume Rendering", value=False)
+        # Visualization Controls
+        st.sidebar.markdown("### 🎨 Visualization Options")
+        show_atlas = st.sidebar.checkbox("Show Brain Surface", value=True)
+        show_heatmap = st.sidebar.checkbox("Probability Heatmap", value=False,
+                                           help="Show lesion probability as color gradient")
         
-        st.markdown("---")
+        st.sidebar.markdown("---")
         st.markdown("### 📊 Detection Threshold")
         threshold = st.slider("Confidence Threshold", 0.0, 1.0, PRESENCE_THRESHOLD, 0.05)
         
@@ -2170,7 +2261,8 @@ def run_streamlit_app():
                 original_volume=st.session_state.original_image,
                 affine=st.session_state.affine,
                 spacing=st.session_state.spacing,
-                show_patient_brain=show_atlas  # Reusing checkbox for patient brain
+                show_patient_brain=show_atlas,
+                show_heatmap=show_heatmap  # Probability heatmap
             )
             
             # Check if figure has any data
