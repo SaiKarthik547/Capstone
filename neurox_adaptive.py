@@ -1099,48 +1099,61 @@ def create_3d_visualization(
     """
     fig = go.Figure()
     
-    # STEP 1: HD-BET Preprocessing (if available)
+    # GOLD-STANDARD: HD-BET as PRIMARY brain extraction
+    # Otsu-based thresholding is NOT robust across MRI datasets
+    # HD-BET provides consistent, anatomically correct brain masks
+    
+    brain_mask_full = None
+    brain_bbox = None
+    
+    # STEP 1: Try HD-BET first (PRIMARY METHOD)
+    print("🎯 Attempting HD-BET brain extraction (primary method)...")
     hdbet_mask, hdbet_bbox = apply_hdbet_preprocessing(original_volume, affine)
     
-    if hdbet_mask is not None and hdbet_bbox is not None:
-        print("🎯 HD-BET: Brain region detected")
-        # Crop to HD-BET bounding box
-        volume_for_otsu = original_volume[hdbet_bbox]
-        print(f"   Cropped to brain region: {volume_for_otsu.shape}")
-        use_hdbet = True
-    else:
-        if HDBET_AVAILABLE:
-            print("⚠️ HD-BET: Failed, using fallback")
-        else:
-            print("ℹ️ HD-BET: Not available, using Otsu only")
-        # Use full volume
-        volume_for_otsu = original_volume
-        hdbet_bbox = None
-        use_hdbet = False
-    
-    # STEP 2: Generate brain mask using Otsu (existing pipeline)
-    try:
-        with st.spinner("Generating brain mask..."):
-            print("🔬 Starting Otsu brain mask generation...")
-            brain_mask_full = generate_brain_mask_otsu(volume_for_otsu)
-            print(f"✅ Brain mask generated: {brain_mask_full.sum():,} voxels")
-        
-        # Compute brain bounding box (crop to brain region)
+    if hdbet_mask is not None and hdbet_bbox is not None and hdbet_mask.sum() > 10000:
+        # HD-BET SUCCESS - use it directly
+        print(f"✅ HD-BET: Successfully extracted brain ({hdbet_mask.sum():,} voxels)")
+        brain_mask_full = hdbet_mask
+        # HD-BET already computed bbox, but we need it for full volume
+        # So we compute bbox from the mask
         brain_bbox = compute_brain_bounding_box(brain_mask_full, margin=5)
+        print(f"   Using HD-BET mask as primary brain extraction")
+        
+    else:
+        # HD-BET FAILED/UNAVAILABLE - fallback to Otsu
+        if HDBET_AVAILABLE:
+            print("⚠️ HD-BET: Extraction failed, falling back to Otsu")
+        else:
+            print("ℹ️ HD-BET: Not available, using Otsu fallback")
+        
+        # STEP 2: Fallback to Otsu-based brain mask
+        try:
+            with st.spinner("Generating brain mask (Otsu fallback)..."):
+                print("🔬 Starting Otsu brain mask generation...")
+                brain_mask_full = generate_brain_mask_otsu(original_volume)
+                print(f"✅ Otsu mask generated: {brain_mask_full.sum():,} voxels")
+            
+            # Compute brain bounding box
+            brain_bbox = compute_brain_bounding_box(brain_mask_full, margin=5)
+            
+        except Exception as e:
+            st.error(f"❌ Brain mask generation failed: {e}")
+            print(f"❌ Brain mask error: {e}")
+            brain_mask_full = None
+            brain_bbox = None
+    
+    # Rest of visualization (common path)
+    if brain_mask_full is not None and brain_bbox is not None:
         bbox_shape = tuple(s.stop - s.start for s in brain_bbox)
         print(f"📦 Bounding box: {bbox_shape} (cropped from {original_volume.shape})")
         
-        # Crop volumes to brain region (NEVER visualize full cube)
+        # Crop volumes to brain region
         brain_mask_cropped = brain_mask_full[brain_bbox]
         original_cropped = original_volume[brain_bbox]
         print(f"✂️ Cropped to brain region")
-        
-    except Exception as e:
-        st.error(f"❌ Brain mask generation failed: {e}")
-        st.warning("Falling back to basic visualization")
-        print(f"❌ Brain mask error: {e}")
+    else:
+        st.error("❌ Could not generate brain mask")
         brain_mask_cropped = None
-        brain_bbox = None
     
     # LAYER 1: Patient-Specific Brain Surface (from mask, not MRI)
     if show_patient_brain and brain_mask_cropped is not None:
