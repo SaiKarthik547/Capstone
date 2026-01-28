@@ -4,7 +4,6 @@
 NeuroX Adaptive – Multi-Disease MRI Analysis System
 Research & Educational Demonstration System
 ═══════════════════════════════════════════════════════════════════════════════
-
 IMPORTANT ACADEMIC DISCLAIMERS:
 
 1. PURPOSE
