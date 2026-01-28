@@ -25,7 +25,7 @@ print("📋 Diseases: Tumor | Stroke | Alzheimer")
 print("=" * 80 + "\n")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CONFIGURATION
+#  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════
 
 SEED = 42
@@ -41,7 +41,7 @@ VALIDATION_SPLIT = 0.1
 PRESENCE_THRESHOLD = 0.5
 CHECKPOINT_DIR = Path("./checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
-
+#Production
 # ═════════════════════════════════════════════════════════════════════════════
 # PRODUCTION-GRADE TRAINING ENHANCEMENTS
 # ═════════════════════════════════════════════════════════════════════════════
