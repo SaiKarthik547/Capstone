@@ -439,61 +439,57 @@ def compute_lesion_metrics(segmentation: np.ndarray, spacing=(1.0, 1.0, 1.0)) ->
     }
 
 
-def apply_clinical_decision_logic(presence_logits: Dict[str, float]) -> Dict:
-    """Apply clinical reasoning with softmax-based mutual exclusivity.
+def apply_multi_label_detection(presence_logits: Dict[str, float], threshold: float = 0.5) -> Dict:
+    """Apply multi-label disease detection with independent probabilities.
     
-    GOLD-STANDARD CLINICAL AI LOGIC:
-    Diseases are mutually exclusive - only ONE can be primary diagnosis.
-    Uses softmax to enforce probability distribution sums to 1.0.
+    CRITICAL CORRECTION: Diseases are NOT mutually exclusive.
+    One patient can have tumor AND stroke AND Alzheimer's simultaneously.
+    
+    Uses sigmoid (NOT softmax) for independent binary classification per disease.
+    This matches the BCEWithLogitsLoss training objective.
     
     Args:
         presence_logits: Raw logits from presence heads {disease: logit_value}
+        threshold: Detection threshold (default: 0.5)
     
     Returns:
         Dict containing:
-            - disease_probabilities: Softmax probabilities (sum to 1.0)
-            - primary_disease: Disease with highest probability
-            - primary_confidence: Confidence of primary disease
-            - threshold_met: Whether confidence exceeds clinical threshold
-            - secondary_probs: Dict of other disease probabilities
+            - disease_probabilities: Independent sigmoid probabilities (can sum to >1.0)
+            - detected_diseases: List of all diseases above threshold
+            - detection_confidence: Dict of confidence per detected disease
+            - all_probabilities: All disease probabilities for reference
     """
     import torch
-    import torch.nn.functional as F
     
-    # Stack logits in consistent order
     disease_names = ["tumor", "stroke", "alzheimer"]
-    logits_list = [presence_logits[d] for d in disease_names]
-    logits_tensor = torch.tensor(logits_list, dtype=torch.float32)
     
-    # Apply softmax for mutual exclusivity
-    probs_tensor = F.softmax(logits_tensor, dim=0)
+    # Apply sigmoid independently to each disease (multi-label)
+    disease_probs = {}
+    for disease in disease_names:
+        logit = presence_logits[disease]
+        # Sigmoid for independent binary classification
+        prob = float(torch.sigmoid(torch.tensor(logit, dtype=torch.float32)).item())
+        disease_probs[disease] = prob
     
-    # Convert to dict
-    disease_probs = {
-        name: float(prob)
-        for name, prob in zip(disease_names, probs_tensor)
+    # Detect ALL diseases above threshold (multi-label)
+    detected_diseases = [
+        disease for disease, prob in disease_probs.items()
+        if prob >= threshold
+    ]
+    
+    # Confidence for detected diseases
+    detection_confidence = {
+        disease: disease_probs[disease]
+        for disease in detected_diseases
     }
-    
-    # Find primary disease
-    primary_disease = max(disease_probs, key=disease_probs.get)
-    primary_confidence = disease_probs[primary_disease]
-    
-    # Secondary diseases
-    secondary_probs = {
-        k: v for k, v in disease_probs.items() if k != primary_disease
-    }
-    
-    # Clinical threshold (60% confidence minimum)
-    CLINICAL_THRESHOLD = 0.6
-    threshold_met = primary_confidence >= CLINICAL_THRESHOLD
     
     return {
         "disease_probabilities": disease_probs,
-        "primary_disease": primary_disease,
-        "primary_confidence": primary_confidence,
-        "threshold_met": threshold_met,
-        "secondary_probs": secondary_probs,
-        "decision_type": "high_confidence" if threshold_met else "uncertain"
+        "detected_diseases": detected_diseases,
+        "detection_confidence": detection_confidence,
+        "all_probabilities": disease_probs,
+        "threshold_used": threshold,
+        "multi_label": True  # Flag indicating multi-label classification
     }
 
 
@@ -501,13 +497,12 @@ def automatic_disease_detection(
     model, 
     image_tensor: torch.Tensor, 
     threshold: float = PRESENCE_THRESHOLD,
-    use_uncertainty: bool = True,
-    use_clinical_logic: bool = True
+    use_uncertainty: bool = True
 ) -> Dict:
-    """Automatic multi-disease detection with clinical decision logic.
+    """Automatic multi-label disease detection.
     
-    MEDICAL-GRADE UPDATE: Now applies softmax-based mutual exclusivity
-    when use_clinical_logic=True (default).
+    CRITICAL: Uses independent sigmoid probabilities (multi-label).
+    One patient can have multiple diseases simultaneously.
     """
     if model is None:
         return {"detected_diseases": [], "probabilities": {}, "uncertainties": {}}
@@ -516,7 +511,6 @@ def automatic_disease_detection(
     probabilities = {}
     uncertainties = {}
     presence_logits = {}
-    detected = []
     
     with torch.no_grad():
         features = model.encoder(image_tensor.to(DEVICE))
@@ -530,7 +524,7 @@ def automatic_disease_detection(
                 mean_prob, uncertainty = head.uncertainty_forward(bottleneck, n_samples=10)
                 probabilities[disease] = mean_prob
                 uncertainties[disease] = uncertainty
-                # Approximate logit from probability (for clinical logic)
+                # Approximate logit from probability
                 presence_logits[disease] = np.log(mean_prob / (1 - mean_prob + 1e-8))
             else:
                 # Standard deterministic inference - extract LOGIT
@@ -540,37 +534,16 @@ def automatic_disease_detection(
                 probabilities[disease] = prob
                 uncertainties[disease] = 0.0
     
-    # Apply clinical decision logic if enabled
-    if use_clinical_logic:
-        clinical_decision = apply_clinical_decision_logic(presence_logits)
-        
-        # Update probabilities with softmax-based ones
-        probabilities_clinical = clinical_decision["disease_probabilities"]
-        
-        # Only primary disease is "detected" if threshold met
-        if clinical_decision["threshold_met"]:
-            detected = [clinical_decision["primary_disease"]]
-        else:
-            detected = []  # Uncertain - no clear diagnosis
-        
-        return {
-            "detected_diseases": detected,
-            "probabilities": probabilities_clinical,  # Softmax probabilities
-            "uncertainties": uncertainties,
-            "clinical_decision": clinical_decision,  # Full clinical analysis
-            "raw_probabilities": probabilities  # Original sigmoid for reference
-        }
-    else:
-        # Legacy behavior (independent sigmoid)
-        for disease in diseases:
-            if probabilities[disease] > threshold:
-                detected.append(disease)
-        
-        return {
-            "detected_diseases": detected,
-            "probabilities": probabilities,
-            "uncertainties": uncertainties
-        }
+    # Apply multi-label detection (independent sigmoid)
+    detection_result = apply_multi_label_detection(presence_logits, threshold)
+    
+    return {
+        "detected_diseases": detection_result["detected_diseases"],
+        "probabilities": detection_result["disease_probabilities"],
+        "uncertainties": uncertainties,
+        "detection_confidence": detection_result["detection_confidence"],
+        "multi_label": True
+    }
 
 
 def perform_segmentation(model, image_tensor: torch.Tensor, diseases: List[str]) -> Dict:
