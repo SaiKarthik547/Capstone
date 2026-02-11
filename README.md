@@ -1,105 +1,135 @@
 # NeuroX - Multi-Disease Brain MRI Analysis System
 
-## 🎯 Overview
+## 📋 Project Overview
 
-NeuroX is a production-grade, multi-label deep learning system for detecting and segmenting brain pathologies from MRI scans. It simultaneously detects **Tumor**, **Stroke**, and **Alzheimer's Disease** with clinical-grade accuracy and uncertainty quantification.
+NeuroX is an advanced deep learning system for automated detection and segmentation of brain pathologies from MRI scans. The system simultaneously analyzes three critical neurological conditions: **Brain Tumors**, **Stroke**, and **Alzheimer's Disease** using state-of-the-art 3D convolutional neural networks with uncertainty quantification.
 
-### Key Features
+### Project Goal
 
-✅ **Multi-Label Classification** - One patient can have multiple diseases simultaneously  
-✅ **Medical-Grade Brain Extraction** - HD-BET for accurate skull stripping  
-✅ **3D Brain Mesh Visualization** - Anatomically accurate surface rendering  
-✅ **Uncertainty Quantification** - Monte Carlo Dropout for confidence estimation  
-✅ **Rejection-Proof Evaluation** - Nested CV, calibration, decision curves, power analysis  
-✅ **Clinical Metrics** - Precision, Recall, F1, PPV, NPV, Sensitivity, Specificity  
+To develop a clinically-viable AI diagnostic assistant that:
+- Provides accurate multi-disease detection from a single MRI scan
+- Generates precise 3D visualizations of brain pathology
+- Quantifies diagnostic uncertainty for clinical decision support
+- Meets publication-grade statistical rigor for medical AI research
 
 ---
 
-## 🚨 Critical Design Decisions
+## ⚠️ Disclaimer
 
-### 1. Multi-Label Classification (NOT Mutual Exclusivity)
+**IMPORTANT LEGAL AND CLINICAL NOTICES:**
 
-**IMPORTANT:** Diseases are **independent**, not mutually exclusive.
+🚨 **NOT FOR CLINICAL USE** - This system is a research prototype and educational tool only. It is NOT approved by FDA, CE, or any regulatory body for clinical diagnosis or treatment decisions.
 
-- ✅ **Correct:** One patient can have Tumor + Stroke + Alzheimer's simultaneously
-- ❌ **Wrong:** Using softmax (forces only one disease)
-- ✅ **Implementation:** Uses `sigmoid` activation with `BCEWithLogitsLoss`
+⚠️ **REQUIRES EXPERT SUPERVISION** - All outputs must be reviewed and validated by qualified medical professionals (radiologists, neurologists). AI predictions are assistive only and cannot replace human clinical judgment.
 
-```python
-# Each disease is independently classified
-probabilities = {
-    "tumor": 0.85,      # 85% confidence
-    "stroke": 0.72,     # 72% confidence  
-    "alzheimer": 0.15   # 15% confidence
-}
-# Patient has BOTH tumor AND stroke (multi-label)
+⚠️ **RESEARCH PURPOSES ONLY** - This software is intended for academic research, algorithm development, and educational demonstrations. Any clinical application requires proper regulatory approval and validation studies.
+
+⚠️ **NO WARRANTY** - Provided "as-is" without any guarantees of accuracy, reliability, or fitness for any particular purpose. Users assume all risks.
+
+⚠️ **DATA PRIVACY** - Users are responsible for ensuring compliance with HIPAA, GDPR, and other applicable data protection regulations when processing medical images.
+
+---
+
+## ✨ Key Features
+
+### Multi-Label Disease Detection
+- ✅ Simultaneous detection of Tumor, Stroke, and Alzheimer's Disease
+- ✅ Independent probability scores (diseases are NOT mutually exclusive)
+- ✅ One patient can have multiple conditions simultaneously
+
+### Medical-Grade Brain Extraction
+- ✅ HD-BET (Heidelberg Brain Extraction Tool) for accurate skull stripping
+- ✅ Separates brain tissue from skull, scalp, and facial structures
+- ✅ Essential for accurate 3D visualization
+
+### 3D Visualization
+- ✅ Interactive 3D brain mesh rendering
+- ✅ Lesion overlay with anatomically accurate positioning
+- ✅ Color-coded pathology visualization
+
+### Uncertainty Quantification
+- ✅ Monte Carlo Dropout for epistemic uncertainty estimation
+- ✅ Confidence scores for each prediction
+- ✅ Helps identify cases requiring expert review
+
+### Clinical Metrics
+- ✅ Comprehensive evaluation: Precision, Recall, F1-Score
+- ✅ Sensitivity, Specificity, PPV, NPV
+- ✅ Volumetric measurements in mm³ and mL
+- ✅ ROC curves and calibration analysis
+
+---
+
+## 🛠️ Technology Stack
+
+### Core Framework
+- **Python 3.8+** - Primary programming language
+- **PyTorch 2.0+** - Deep learning framework
+- **CUDA 11.8+** - GPU acceleration (optional)
+
+### Medical Imaging
+- **NiBabel** - NIfTI file I/O
+- **HD-BET** - Medical-grade brain extraction
+- **Scikit-image** - Image processing and marching cubes
+- **SciPy** - Scientific computing and morphological operations
+
+### Deep Learning Architecture
+- **3D CNN Encoder** - Shared feature extraction
+- **Transformer Bottleneck** - Global context modeling
+- **Multi-Head Architecture** - Independent disease classifiers
+- **Attention-Gated U-Net** - Segmentation decoders
+- **InstanceNorm3d** - Normalization for small-batch stability
+
+### Visualization
+- **Streamlit** - Web application framework
+- **Plotly** - Interactive 3D graphics
+- **Trimesh** - 3D mesh processing
+- **Matplotlib** - 2D plotting and analysis
+
+### Evaluation & Statistics
+- **Scikit-learn** - ML metrics and evaluation
+- **Iterative-stratification** - Multi-label cross-validation
+- **NumPy** - Numerical computing
+- **Pandas** - Data analysis (optional)
+
+### Report Generation
+- **ReportLab** - PDF report creation
+- **Groq AI** - Optional AI-powered insights (requires API key)
+
+---
+
+## 📦 Installation
+
+### 1. Clone Repository
+
+```bash
+git clone https://github.com/SaiKarthik547/Capstone.git
+cd Capstone
 ```
 
-### 2. HD-BET Brain Extraction
-
-**CRITICAL:** 3D brain mesh generation MUST use extracted brain mask, NOT raw MRI.
-
-- ✅ **Correct:** HD-BET → Brain Mask → Marching Cubes → 3D Mesh
-- ❌ **Wrong:** Raw MRI → Marching Cubes (includes skull, face, eyes)
-
-```python
-# Correct pipeline
-brain_volume, brain_mask = apply_hdbet_brain_extraction(mri_volume, affine, spacing)
-vertices, faces = generate_patient_brain_surface(brain_mask, affine, spacing)
-```
-
-### 3. Model Weights
-
-**Model file:** `neurox_multihead_final.pth` (21.6 MB)  
-**Location:** `c:\Users\karth\OneDrive\Desktop\neurox\neurox_multihead_final.pth`
-
-The model uses:
-- **Encoder:** Shared 3D CNN with Transformer bottleneck
-- **Presence Heads:** 3 independent binary classifiers (Tumor, Stroke, Alzheimer)
-- **Segmentation Decoders:** 2 decoders (Tumor: 4 classes, Stroke: 1 class)
-- **Normalization:** InstanceNorm3d for small-batch stability
-
----
-
-## 📊 Evaluation System
-
-### Comprehensive Metrics
-
-All evaluations include:
-
-| Metric | Description |
-|--------|-------------|
-| **Sensitivity** | True Positive Rate (Recall) |
-| **Specificity** | True Negative Rate |
-| **Precision** | Positive Predictive Value (PPV) |
-| **NPV** | Negative Predictive Value |
-| **F1-Score** | Harmonic mean of Precision & Recall |
-| **Accuracy** | Overall correctness |
-| **AUC-ROC** | Area Under ROC Curve |
-| **AUC-PR** | Area Under Precision-Recall Curve |
-
-### Rejection-Proof Features
-
-1. **Nested Cross-Validation** (5 outer × 3 inner folds)
-2. **Multi-Label Stratification** (Sechidis et al.)
-3. **Temperature Scaling** (Probability calibration)
-4. **ROC Operating Points** (Sens@95%Spec, Spec@95%Sens)
-5. **Decision Curve Analysis** (Clinical utility)
-6. **Power Analysis** (Sample size justification)
-7. **Patient-Level Bootstrap** (1000-2000 resamples for CI)
-8. **Lesion-Level IoU Matching** (Component-wise detection)
-
----
-
-## 🚀 Installation
-
-### 1. Install Python Dependencies
+### 2. Install Python Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Install HD-BET (Medical-Grade Brain Extraction)
+**Required packages:**
+```
+torch>=2.0.0
+nibabel>=5.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-image>=0.20.0
+scikit-learn>=1.3.0
+streamlit>=1.28.0
+plotly>=5.17.0
+trimesh>=4.0.0
+matplotlib>=3.7.0
+reportlab>=4.0.0
+iterative-stratification>=0.1.7
+```
+
+### 3. Install HD-BET (Medical-Grade Brain Extraction)
 
 ```bash
 pip install HD-BET
@@ -110,13 +140,76 @@ pip install HD-BET
 hd-bet -h
 ```
 
-If successful, you should see HD-BET help message.
+If successful, you should see HD-BET help documentation.
 
-### 3. Install Evaluation Dependencies
+### 4. Download Model Weights
+
+The trained model file (`neurox_multihead_final.pth`, 21.6 MB) should be placed in the project root directory.
+
+---
+
+## 🚀 Usage
+
+### Running the Application
 
 ```bash
-pip install iterative-stratification
+streamlit run neurox_adaptive.py
 ```
+
+The web interface will open automatically at `http://localhost:8501`.
+
+### Workflow
+
+1. **Upload MRI Scan**
+   - Supported formats: `.nii`, `.nii.gz` (NIfTI)
+   - Recommended: T1-weighted, T2-weighted, or FLAIR sequences
+   - File size: Typically 5-50 MB
+
+2. **Automatic Analysis** (takes 30-60 seconds)
+   - Brain extraction using HD-BET
+   - Multi-label disease detection
+   - Lesion segmentation (Tumor/Stroke)
+   - Uncertainty quantification
+   - 3D mesh generation
+
+3. **Review Results**
+   - **Detection Tab**: Probability scores for each disease
+   - **3D Visualization**: Interactive brain mesh with lesions
+   - **Metrics Tab**: Volumetric measurements and statistics
+   - **AI Insights**: Optional AI-generated clinical summary
+
+4. **Export Report**
+   - Download comprehensive PDF report
+   - Includes all visualizations and metrics
+   - Timestamped for record-keeping
+
+---
+
+## 📊 Evaluation System
+
+The project includes a comprehensive evaluation framework for publication-grade validation:
+
+### Running Tests
+
+```bash
+python run_evaluation_test.py
+```
+
+**Expected output:**
+```
+✅ TEST 1 PASSED: Comprehensive metrics
+✅ TEST 2 PASSED: Temperature scaling  
+✅ TEST 3 PASSED: ROC operating points
+✅ TEST 4 PASSED: Decision curve analysis
+✅ TEST 5 PASSED: Power analysis
+```
+
+### Evaluation Modules
+
+- **`evaluation/nested_cv.py`** - Nested cross-validation, multi-label stratification
+- **`evaluation/calibration.py`** - Temperature scaling, calibration metrics
+- **`evaluation/statistical_rigor.py`** - IoU matching, decision curves, power analysis
+- **`evaluation/run_evaluation.py`** - Main evaluation orchestrator
 
 ---
 
@@ -130,84 +223,17 @@ neurox/
 ├── requirements.txt                # Python dependencies
 ├── README.md                       # This file
 │
-├── evaluation/                     # Rejection-proof evaluation system
-│   ├── nested_cv.py               # Nested CV, multi-label stratification
-│   ├── calibration.py             # Temperature scaling, Brier/ECE, ROC points
-│   ├── statistical_rigor.py       # IoU matching, DCA, power analysis
-│   ├── run_evaluation.py          # Main evaluation orchestrator
-│   └── README.md                  # Evaluation documentation
+├── evaluation/                     # Evaluation system
+│   ├── nested_cv.py               # Nested CV framework
+│   ├── calibration.py             # Calibration & thresholds
+│   ├── statistical_rigor.py       # Statistical analysis
+│   ├── run_evaluation.py          # Main orchestrator
+│   └── README.md                  # Evaluation docs
 │
-├── run_evaluation_test.py         # Comprehensive test suite (ALL TESTS PASSED ✅)
+├── run_evaluation_test.py         # Test suite
 │
 └── assets/                        # Static assets
     └── brain/                     # Brain atlas files
-```
-
----
-
-## 🎮 Usage
-
-### Running the Application
-
-```bash
-streamlit run neurox_adaptive.py
-```
-
-The application will open in your browser at `http://localhost:8501`.
-
-### Workflow
-
-1. **Upload MRI Scan** (NIfTI format: `.nii` or `.nii.gz`)
-2. **Automatic Analysis**
-   - Brain extraction (HD-BET)
-   - Multi-label disease detection
-   - Segmentation (Tumor/Stroke)
-   - Uncertainty quantification
-3. **View Results**
-   - 3D brain mesh with lesions
-   - Probability scores per disease
-   - Volumetric measurements
-   - Clinical metrics
-4. **Export Report** (PDF with visualizations)
-
----
-
-## 🧪 Running Evaluation Tests
-
-### Quick Test
-
-```bash
-python run_evaluation_test.py
-```
-
-**Expected output:**
-```
-✅ TEST 1 PASSED: Comprehensive metrics
-✅ TEST 2 PASSED: Temperature scaling
-✅ TEST 3 PASSED: ROC operating points
-✅ TEST 4 PASSED: Decision curve analysis
-✅ TEST 5 PASSED: Power analysis
-
-System Ready for Production Use!
-```
-
-### Full Evaluation Pipeline
-
-```python
-from evaluation.run_evaluation import NeuroXEvaluationPipeline
-
-# Initialize
-pipeline = NeuroXEvaluationPipeline(output_dir="./results")
-
-# Run phases
-pipeline.run_phase1_verification(model, dataset)
-results = pipeline.run_phase2_nested_cv(model_class, dataset, hyperparams, train_fn, eval_fn)
-calib = pipeline.run_phase3_calibration(logits_dict, labels_dict)
-thresh = pipeline.run_phase4_thresholds(labels_dict, calib['calibrated_probs'])
-dca = pipeline.run_phase7_decision_curves(labels_dict, calib['calibrated_probs'])
-
-# Generate report
-pipeline.generate_final_report()
 ```
 
 ---
@@ -217,41 +243,23 @@ pipeline.generate_final_report()
 ### Environment Variables
 
 ```bash
-# Offline mode (disable Groq AI)
+# Disable Groq AI (offline mode)
 export NEUROX_OFFLINE=true
 
-# Device selection
-export CUDA_VISIBLE_DEVICES=0  # Use GPU 0
+# GPU selection
+export CUDA_VISIBLE_DEVICES=0
 ```
 
 ### Model Configuration
 
-Edit `neurox_adaptive.py`:
+Edit `neurox_adaptive.py` (lines 94-98):
 
 ```python
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
-PRESENCE_THRESHOLD = 0.5  # Detection threshold
-MODEL_PATH = r"C:\Users\karth\OneDrive\Desktop\neurox\neurox_multihead_final.pth"
+PRESENCE_THRESHOLD = 0.5
+MODEL_PATH = r"path/to/neurox_multihead_final.pth"
 ```
-
----
-
-## 📈 Performance Metrics
-
-### Test Results (Synthetic Data)
-
-| Disease | Sensitivity | Specificity | Precision | F1-Score |
-|---------|-------------|-------------|-----------|----------|
-| Tumor   | 0.929       | 0.214       | 0.345     | 0.503    |
-| Stroke  | 0.851       | 0.413       | 0.392     | 0.537    |
-| Alzheimer | 0.682     | 0.592       | 0.427     | 0.525    |
-
-### Calibration
-
-- **ECE Before:** 0.330
-- **ECE After:** 0.240
-- **Improvement:** 27.2%
 
 ---
 
@@ -260,86 +268,77 @@ MODEL_PATH = r"C:\Users\karth\OneDrive\Desktop\neurox\neurox_multihead_final.pth
 ### HD-BET Not Found
 
 ```bash
-# Install HD-BET
 pip install HD-BET
-
-# Verify
-hd-bet -h
+hd-bet -h  # Verify installation
 ```
 
-If still not working, 3D brain mesh visualization will be disabled (safe fallback).
+If HD-BET is unavailable, 3D visualization will be disabled (safe fallback).
 
 ### CUDA Out of Memory
 
-Reduce batch size or use CPU:
-
+Use CPU mode:
 ```python
 DEVICE = torch.device("cpu")
 ```
 
+Or reduce batch size in training script.
+
 ### Import Errors
 
 ```bash
-# Reinstall dependencies
 pip install -r requirements.txt --force-reinstall
 ```
 
 ---
 
-## 📚 Scientific Basis
+## 📚 Scientific References
 
-### References
-
-1. **Nested CV:** Varma & Simon (2006), Cawley & Talbot (2010)
-2. **Multi-Label Stratification:** Sechidis et al. (2011)
-3. **Temperature Scaling:** Guo et al. (ICML 2017)
-4. **Decision Curves:** Vickers & Elkin (2006)
-5. **Power Analysis:** Hanley & McNeil (1982)
-6. **HD-BET:** Isensee et al. (2019)
-7. **Monte Carlo Dropout:** Gal & Ghahramani (2016)
+1. **HD-BET:** Isensee et al., "Automated brain extraction of multisequence MRI using artificial neural networks" (2019)
+2. **Nested CV:** Varma & Simon, "Bias in error estimation when using cross-validation for model selection" (2006)
+3. **Temperature Scaling:** Guo et al., "On Calibration of Modern Neural Networks" (ICML 2017)
+4. **Monte Carlo Dropout:** Gal & Ghahramani, "Dropout as a Bayesian Approximation" (2016)
+5. **Decision Curves:** Vickers & Elkin, "Decision Curve Analysis" (2006)
+6. **Multi-Label Stratification:** Sechidis et al., "On the stratification of multi-label data" (2011)
 
 ---
 
-## 🔒 Clinical Safety
+## 📄 License
 
-### Quality Assurance
+**Academic and Research Use Only**
 
-✅ **Deterministic Mode** - Reproducible results (seed=42)  
-✅ **Uncertainty Quantification** - Model confidence scores  
-✅ **Anatomical Validation** - Lesions must be inside brain  
-✅ **Brain Mask Validation** - 5-70% of total volume  
-✅ **Multi-Label Support** - Handles co-occurring diseases  
-
-### Limitations
-
-⚠️ **Research Use Only** - Not FDA approved  
-⚠️ **Requires Expert Review** - AI assists, doesn't replace radiologists  
-⚠️ **MRI Quality** - Requires T1/T2/FLAIR sequences  
-⚠️ **Population Bias** - Trained on specific datasets  
+This software is provided for educational and research purposes. Commercial use, clinical deployment, or any application involving patient care requires:
+- Proper regulatory approval (FDA, CE, etc.)
+- Clinical validation studies
+- Institutional review board (IRB) approval
+- Separate licensing agreement
 
 ---
 
-## 📝 License
+## 👥 Contributors
 
-Research and educational use only. Not for clinical diagnosis without expert supervision.
-
----
-
-## 🤝 Contributing
-
-For bugs or feature requests, please contact the development team.
+**Sai Karthik** - Project Lead & Development
 
 ---
 
-## 📧 Support
+## 📧 Contact & Support
 
-For technical support or questions about the evaluation system, refer to:
-- `evaluation/README.md` - Evaluation system documentation
-- `run_evaluation_test.py` - Working examples
-- `architecture_improvements_plan.md` - Complete technical blueprint
+For technical questions, bug reports, or collaboration inquiries:
+- **GitHub Issues:** [Report a bug](https://github.com/SaiKarthik547/Capstone/issues)
+- **Documentation:** See `evaluation/README.md` for detailed evaluation docs
+
+---
+
+## 🎯 Future Enhancements
+
+- [ ] External validation on independent datasets
+- [ ] Additional disease categories (hemorrhage, MS lesions)
+- [ ] Real-time inference optimization
+- [ ] Multi-sequence fusion (T1 + T2 + FLAIR)
+- [ ] Longitudinal analysis (disease progression tracking)
+- [ ] Integration with PACS systems
 
 ---
 
 **Version:** 1.5.0  
-**Last Updated:** 2026-02-11  
-**Status:** ✅ Production Ready
+**Last Updated:** February 11, 2026  
+**Status:** ✅ Research Prototype - Production-Grade Code Quality
