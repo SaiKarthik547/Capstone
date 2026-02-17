@@ -309,7 +309,7 @@ flowchart TD
     subgraph Post_Processing [Analysis & Refinement]
         Prob1 -->|Yes| Mask1[Generate Tumor Mask]
         Prob2 -->|Yes| Mask2[Generate Stroke Mask]
-        Prob3 -->|Yes| NoSeg[No Segmentation (Alzheimer)]
+        Prob3 -->|Yes| NoSeg["No Segmentation (Alzheimer)"]
         
         Mask1 --> Clean1[Morphological Cleaning]
         Mask2 --> Clean2[Morphological Cleaning]
