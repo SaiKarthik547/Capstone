@@ -12,6 +12,28 @@ To develop a clinically-viable AI diagnostic assistant that:
 - Quantifies diagnostic uncertainty for clinical decision support
 - Meets publication-grade statistical rigor for medical AI research
 
+## ⚡ Quick Start
+
+Get the system running in under 5 minutes:
+
+1.  **Clone & Install**:
+    ```bash
+    git clone https://github.com/SaiKarthik547/Capstone.git
+    cd Capstone
+    pip install -r requirements.txt
+    pip install HD-BET
+    ```
+
+2.  **Download Models**:
+    - Place `neurox_multihead_final.pth` in the project root.
+    - (Optional) Download HD-BET weights if not automatic.
+
+3.  **Run**:
+    ```bash
+    streamlit run neurox_adaptive.py
+    ```
+
+
 ---
 
 ## ⚠️ Disclaimer
@@ -144,7 +166,12 @@ If successful, you should see HD-BET help documentation.
 
 ### 4. Download Model Weights
 
-The trained model file (`neurox_multihead_final.pth`, 21.6 MB) should be placed in the project root directory.
+**Essential:**
+1.  **NeuroX Model**: Download `neurox_multihead_final.pth` (21.6 MB) and place it in the **root directory** (`neurox/`).
+    - [Download Link Placeholder]
+
+**Optional (for 3D Brain Extraction):**
+2.  **HD-BET Weights**: The system attempts to download these automatically. If it fails, download `hd-bet_params.folder` and place in `~/.hd-bet/`.
 
 ---
 
@@ -347,23 +374,21 @@ flowchart TD
 
 ```
 neurox/
-├── neurox_adaptive.py              # Main Streamlit application
-├── neurox_train_kaggle.py          # Training script
-├── neurox_multihead_final.pth      # Trained model weights (21.6 MB)
-├── requirements.txt                # Python dependencies
-├── README.md                       # This file
-│
-├── evaluation/                     # Evaluation system
-│   ├── nested_cv.py               # Nested CV framework
-│   ├── calibration.py             # Calibration & thresholds
-│   ├── statistical_rigor.py       # Statistical analysis
-│   ├── run_evaluation.py          # Main orchestrator
-│   └── README.md                  # Evaluation docs
-│
-├── run_evaluation_test.py         # Test suite
-│
-└── assets/                        # Static assets
-    └── brain/                     # Brain atlas files
+├── .github/                   # GitHub workflows (CI/CD)
+├── assets/                    # Static assets
+│   └── brain/                 # Brain atlas templates (FreeSurfer)
+├── evaluation/                # Evaluation & Validation System
+│   ├── calibration.py         # Reliability diagrams & temperature scaling
+│   ├── nested_cv.py           # Nested Cross-Validation (5x2)
+│   ├── run_evaluation.py      # Main evaluation orchestrator
+│   └── statistical_rigor.py   # Statistical tests (McNemar, t-tests)
+├── release_v1.5.0/            # Local HD-BET model weights
+├── LICENSE                    # MIT License
+├── README.md                  # Project Documentation
+├── neurox_adaptive.py         # 🚀 Main Application (Streamlit)
+├── neurox_multihead_final.pth # 🧠 Trained Model Weights
+├── neurox_train_kaggle.py     # Training Pipeline
+└── requirements.txt           # Dependency Requirements
 ```
 
 ---
