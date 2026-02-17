@@ -2164,10 +2164,24 @@ def run_streamlit_app():
         }
 
         /* SIDEBAR */
+
+
+        /* HIDE SIDEBAR COLLAPSE BUTTON */
+        [data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+        
+        /* HIDE SIDEBAR COMPLETELY */
+        [data-testid="stSidebar"] {
+            display: none !important;
+        }
+        
+        [data-testid="stSidebarNav"] {
+            display: none !important;
+        }
+        
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, rgba(3, 7, 18, 0.95), rgba(10, 18, 32, 0.9));
-            backdrop-filter: blur(16px);
-            border-right: 1px solid rgba(0, 229, 255, 0.15);
+            display: none !important;
         }
 
         /* COMPACT HEADINGS */
@@ -2202,6 +2216,14 @@ def run_streamlit_app():
         st.session_state.roi_metadata = {}
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
+        
+    # GLOBAL SETTINGS STATE (Initialize defaults)
+    if 'show_atlas' not in st.session_state:
+        st.session_state.show_atlas = True
+    if 'show_heatmap' not in st.session_state:
+        st.session_state.show_heatmap = False
+    if 'confidence_threshold' not in st.session_state:
+        st.session_state.confidence_threshold = PRESENCE_THRESHOLD
     
     # HD-BET AVAILABILITY CHECK (RUNS ONLY ONCE AT STARTUP)
     if 'hdbet_available' not in st.session_state:
@@ -2264,7 +2286,7 @@ def run_streamlit_app():
     </div>
     """, unsafe_allow_html=True)
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         if st.button("📁 UPLOAD", key="nav_upload", use_container_width=True):
@@ -2285,35 +2307,13 @@ def run_streamlit_app():
         if st.button("📄 REPORTS", key="nav_reports", use_container_width=True, disabled=not st.session_state.analysis_complete):
             st.session_state.current_page = 'reports'
             st.rerun()
-    
-    # Sidebar
-    with st.sidebar:
-        st.markdown("### 🎛️ System Configuration")
-        
-        # Groq API Key
-        groq_key = st.text_input("Groq API Key (Optional)", type="password", 
-                                  help="Enable AI-powered reports")
-        
-        # Visualization Controls
-        st.sidebar.markdown("### 🎨 Visualization Options")
-        show_atlas = st.sidebar.checkbox("Show Brain Surface", value=True)
-        show_heatmap = st.sidebar.checkbox("Probability Heatmap", value=False,
-                                           help="Show lesion probability as color gradient")
-        
-        st.sidebar.markdown("---")
-        st.markdown("### 📊 Detection Threshold")
-        threshold = st.slider("Confidence Threshold", 0.0, 1.0, PRESENCE_THRESHOLD, 0.05)
-        
-        st.markdown("---")
-        st.markdown("### ℹ️ About")
-        st.info("""
-**NeuroX** uses deep learning to detect:
-- Brain Tumors (BraTS)
-- Ischemic Strokes (ISLES)
-- Alzheimer Patterns (ADNI)
 
-**Automatic routing** ensures proper handling of each disease type.
-        """)
+    with col5:
+        if st.button("⚙️ SETTINGS", key="nav_settings", use_container_width=True):
+            st.session_state.current_page = 'settings'
+            st.rerun()
+    
+    # REMOVED SIDEBAR: All controls now in Settings page
     
     
     # PAGE ROUTING
@@ -2358,7 +2358,9 @@ def run_streamlit_app():
                                 image_tensor, original_data, roi_metadata, affine, spacing = load_and_preprocess_nifti(tmp_path)
                                 image_tensor = image_tensor.to(DEVICE)
                                 
-                                detection = automatic_disease_detection(model, image_tensor, threshold)
+                                # Use session safe threshold
+                                thr = st.session_state.confidence_threshold
+                                detection = automatic_disease_detection(model, image_tensor, thr)
                                 detected = detection["detected_diseases"]
                                 
                                 # Store ALL components including affine/spacing
@@ -2602,8 +2604,8 @@ def run_streamlit_app():
                     original_volume=st.session_state.original_image,
                     affine=st.session_state.affine,
                     spacing=st.session_state.spacing,
-                    show_patient_brain=show_atlas,
-                    show_heatmap=show_heatmap
+                    show_patient_brain=st.session_state.show_atlas,
+                    show_heatmap=st.session_state.show_heatmap
                 )
                 
                 if len(fig_3d.data) > 0:
@@ -2642,11 +2644,17 @@ def run_streamlit_app():
             
             with col2:
                 if st.button("✨ GENERATE REPORT", use_container_width=True):
+                    # Check for API Key in Session State
+                    api_key = st.session_state.get('groq_api_key', None)
+                    
+                    if not api_key:
+                        st.warning("⚠️ No Groq API Key found. Using fallback template. Go to **Settings** to configure AI.")
+                    
                     with st.spinner("✍️ Generating AI report..."):
                         st.session_state.report_text = generate_ai_report(
                             st.session_state.detection_results,
                             st.session_state.segmentation_results,
-                            groq_key if groq_key else None
+                            api_key
                         )
             
             if st.session_state.report_text:
@@ -2657,7 +2665,7 @@ def run_streamlit_app():
                 col1, col2, col3 = st.columns([2, 1, 1])
                 
                 with col2:
-                    if st.button("� SAVE TEXT", use_container_width=True):
+                    if st.button("💾 SAVE TEXT", use_container_width=True):
                         st.download_button(
                             "Download TXT",
                             st.session_state.report_text,
@@ -2679,6 +2687,88 @@ def run_streamlit_app():
                             os.unlink(pdf_path)
         else:
             st.info("No detection results available. Complete analysis first.")
+
+    elif st.session_state.current_page == 'settings':
+        # ========== SETTINGS PAGE ==========
+        st.markdown("## ⚙️ System Settings")
+        st.markdown("---")
+        
+        st.markdown("""
+        <div class="glass-card">
+            <h3 style="color: #00E5FF; margin-bottom: 10px;">🔑 API Configuration</h3>
+            <p style="color: #94A3B8; font-size: 13px;">Configure external AI services for enhanced reporting.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Initialize key if not present
+        if 'groq_api_key' not in st.session_state:
+            st.session_state.groq_api_key = ""
+        
+        # API Key Input
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_key = st.text_input(
+                "Groq API Key", 
+                value=st.session_state.groq_api_key, 
+                type="password",
+                help="Enter your Groq API key (starts with gsk_)"
+            )
+        
+        with col2:
+            st.write("") # Spacer
+            st.write("") 
+            if st.button("💾 SAVE KEY", use_container_width=True):
+                st.session_state.groq_api_key = new_key
+                st.success("✅ API Key Saved!")
+                
+        if st.session_state.groq_api_key:
+            st.info(f"✅ Active Key: {st.session_state.groq_api_key[:8]}...{st.session_state.groq_api_key[-4:]}")
+        else:
+            st.warning("⚠️ No API Key configured. AI reporting will be disabled.")
+            
+        # 2. Visualization Options (Restored)
+        st.markdown("---")
+        st.markdown("""
+        <div class="glass-card">
+            <h3 style="color: #00E5FF; margin-bottom: 10px;">🎨 Visualization Options</h3>
+            <p style="color: #94A3B8; font-size: 13px;">Customize how 3D models and results are rendered.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            st.session_state.show_atlas = st.checkbox("Show Brain Surface Atlas", value=st.session_state.show_atlas,
+                                                     help="Toggle the translucent brain shell reference.")
+        with col_v2:
+            st.session_state.show_heatmap = st.checkbox("Show Probability Heatmap", value=st.session_state.show_heatmap,
+                                                       help="Overlay probability gradients on the segmentation.")
+
+        # 3. Detection Config (Restored)
+        st.markdown("---")
+        st.markdown("""
+        <div class="glass-card">
+            <h3 style="color: #00E5FF; margin-bottom: 10px;">📊 Analysis Configuration</h3>
+            <p style="color: #94A3B8; font-size: 13px;">Adjust sensitivity and detection parameters.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.session_state.confidence_threshold = st.slider(
+            "Confidence Threshold", 
+            0.0, 1.0, 
+            st.session_state.confidence_threshold, 
+            0.05,
+            help="Minimum confidence required to flag a disease as detected."
+        )
+        st.caption(f"Current System Sensitivity: **{st.session_state.confidence_threshold:.0%}** (Lower = More Sensitive/More False Positives)")
+            
+        st.markdown("---")
+        st.markdown("### 🛠️ System Info")
+        st.code(f"""
+        NeuroX Version: 1.5.0
+        PyTorch: {torch.__version__}
+        Device: {DEVICE}
+        HD-BET: {'Available ✅' if HDBET_AVAILABLE else 'Not Found ❌'}
+        """)
 
 
 if __name__ == "__main__":
