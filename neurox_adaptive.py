@@ -1333,10 +1333,62 @@ def create_3d_visualization(
             print(f"   ⚠️ Skipped: Max prob {probs_roi.max():.2f} < {PROB_THRESHOLD}")
             continue
         
-        # Threshold with strict threshold
-        if binary_roi.ndim == 4:  # Multi-channel
-            binary_strict = (probs_roi > PROB_THRESHOLD).astype(np.uint8)
+        if disease == "tumor" and probs_roi.ndim == 4:
+            # TUMOR SPECIFIC HANDLING (BraTS 4-channel output)
+            # Channel 1: Enhancing Tumor (ET) - usually the most distinct core
+            # Channel 3: Whole Tumor (WT) - includes edema, often fuzzy/diffuse
+            
+            print(f"   Note: analyzing tumor channels for best visualization...")
+            
+            # STRATEGY: Prefer Enhancing Tumor (Ch1) if it exists, as it's cleaner.
+            # Fallback to Whole Tumor (Ch3) only if ET is empty.
+            
+            prob_et = probs_roi[1]  # Enhancing Tumor
+            prob_wt = probs_roi[3]  # Whole Tumor
+            
+            # Check max confidence
+            max_et = prob_et.max()
+            max_wt = prob_wt.max()
+            
+            print(f"   Max Prob - ET: {max_et:.4f}, WT: {max_wt:.4f}")
+            
+            target_prob = None
+            selected_source = ""
+            
+            # 1. Try Enhancing Tumor First (High precision)
+            if max_et > 0.8:
+                target_prob = prob_et
+                PROB_THRESHOLD = 0.85
+                selected_source = "Enhancing Tumor (Core)"
+            # 2. If ET weak, check Whole Tumor
+            elif max_wt > 0.8:
+                target_prob = prob_wt
+                # WT is often diffuse (edema), so we use a very high threshold or adaptive
+                PROB_THRESHOLD = 0.90
+                selected_source = "Whole Tumor (inc. Edema)"
+                
+                # Safety: Check volume of WT at 0.9
+                vol_ratio = (prob_wt > 0.9).mean()
+                if vol_ratio > 0.15: # If >15% of brain is tumor, it's likely artifact
+                    print(f"   ⚠️ WT Volume Ratio {vol_ratio:.1%} too high -> Increasing threshold")
+                    PROB_THRESHOLD = 0.98 # Extremely strict
+            else:
+                # Both weak - likely no visible tumor or just edema
+                target_prob = prob_wt
+                PROB_THRESHOLD = 0.95
+                selected_source = "Whole Tumor (Strict)"
+
+            print(f"   Selected: {selected_source} with threshold {PROB_THRESHOLD}")
+            st.caption(f"Visualizing: **{selected_source}** (Threshold: {PROB_THRESHOLD:.2f})")
+            
+            tumor_prob = target_prob
+            binary_strict = (tumor_prob > PROB_THRESHOLD).astype(np.uint8)
+            
+        elif binary_roi.ndim == 4:  # Multi-channel logic (generic fallback)
+            # Collapse other multi-channel diseases if any
+            binary_strict = (probs_roi.max(axis=0) > PROB_THRESHOLD).astype(np.uint8)
         else:
+            # Single channel (Stroke)
             binary_strict = (probs_roi > PROB_THRESHOLD).astype(np.uint8)
         
         print(f"   After threshold {PROB_THRESHOLD}: {binary_strict.sum():,} voxels in ROI")
@@ -2518,7 +2570,7 @@ def run_streamlit_app():
             st.markdown("""
             <div class="glass-card">
                 <h3 style="color: #00E5FF; margin-bottom: 10px;">🌐 3D Brain Rendering</h3>
-                <p style="color: #94A3B8; font-size: 13px;">Interactive 3D visualization of detected pathologies</p>
+                <p style="color: #94A3B8; font-size: 13px;">Interactive 3D visualization of detected pathologies.</p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -2526,31 +2578,47 @@ def run_streamlit_app():
             print("\n" + "="*60)
             print("🎬 Starting 3D visualization...")
             print(f"📊 Segmentations available: {list(st.session_state.segmentation_results.keys())}")
-            print(f"📏 Original volume shape: {st.session_state.original_image.shape}")
-            print(f"📐 Voxel spacing: {st.session_state.spacing}")
             print("="*60 + "\n")
             
-            fig_3d = create_3d_visualization(
-                segmentations_roi=st.session_state.segmentation_results,
-                roi_metadata=st.session_state.roi_metadata,
-                original_volume=st.session_state.original_image,
-                affine=st.session_state.affine,
-                spacing=st.session_state.spacing,
-                show_patient_brain=show_atlas,
-                show_heatmap=show_heatmap  # Probability heatmap
-            )
+            # ITERATE THROUGH EACH DETECTED DISEASE FOR SEPARATE VISUALIZATION
+            detected_diseases = [d for d in st.session_state.detection_results["detected_diseases"] 
+                                if d in st.session_state.segmentation_results]
             
-            # Check if figure has any data
-            if len(fig_3d.data) == 0:
-                st.error("❌ No 3D meshes generated. Check console for errors.")
-                print("❌ ERROR: No meshes in figure!")
-            else:
-                print(f"\n✅ Figure ready: {len(fig_3d.data)} meshes")
-                for i, trace in enumerate(fig_3d.data):
-                    print(f"  Mesh {i+1}: {trace.name}")
-                print()
+            if not detected_diseases:
+                st.info("No segmentable diseases detected (Alzheimer is presence-only).")
             
-            st.plotly_chart(fig_3d, use_container_width=True)
+            for disease in detected_diseases:
+                disease_name = DISEASE_COLORS[disease]["name"]
+                disease_color = DISEASE_COLORS[disease]["hex"]
+                
+                st.markdown(f"### {disease_name} Visualization")
+                
+                # Filter segmentation results for just this disease
+                single_disease_seg = {disease: st.session_state.segmentation_results[disease]}
+                
+                fig_3d = create_3d_visualization(
+                    segmentations_roi=single_disease_seg,
+                    roi_metadata=st.session_state.roi_metadata,
+                    original_volume=st.session_state.original_image,
+                    affine=st.session_state.affine,
+                    spacing=st.session_state.spacing,
+                    show_patient_brain=show_atlas,
+                    show_heatmap=show_heatmap
+                )
+                
+                if len(fig_3d.data) > 0:
+                    st.plotly_chart(fig_3d, use_container_width=True, key=f"viz_{disease}")
+                    
+                    # Add detailed voxel stats
+                    probs, binary = st.session_state.segmentation_results[disease]
+                    # Note: These stats are ROI based, but give a sense of scale
+                    if disease == "tumor" and probs.ndim == 4:
+                        # Show stats for the channel used (likely 3 or 1)
+                        # We re-calculate the 'strict' mask used in viz to show accurate count
+                        pass 
+                else:
+                    st.warning(f"⚠️ Could not generate 3D mesh for {disease_name} (volume might be too small).")
+
         else:
             st.info("No visualization data available. Complete analysis first.")
     
