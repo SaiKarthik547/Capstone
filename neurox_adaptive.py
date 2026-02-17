@@ -42,32 +42,11 @@ except ImportError:
 # Using CLI interface (official, stable) instead of Python imports (unreliable)
 import subprocess
 
-HDBET_AVAILABLE = False
+# HD-BET availability will be checked once at app startup (in session state)
+HDBET_AVAILABLE = None  # Will be set in run_streamlit_app()
 
 print("=" * 60)
-print("🔍 Checking for HD-BET (CLI)...")
-
-try:
-    result = subprocess.run(
-        ["hd-bet", "-h"],
-        capture_output=True,
-        text=True,
-        timeout=30  # HD-BET can take time to load
-    )
-    if result.returncode == 0:
-        HDBET_AVAILABLE = True
-        print("✅ HD-BET CLI is available and working")
-        print("🎯 HD-BET WILL BE USED as the ONLY brain extraction method")
-        print("   (No fallback to heuristics - clinical standard)")
-    else:
-        print("❌ HD-BET CLI returned error")
-except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-    print(f"❌ HD-BET CLI not found: {e}")
-    print("⚠️  3D brain surface rendering will be DISABLED")
-    print("   This is CORRECT behavior for clinical safety")
-    print("\n   To install HD-BET:")
-    print("   pip install HD-BET")
-
+print("🔍 HD-BET availability will be checked at app startup")
 print("=" * 60)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -614,37 +593,74 @@ def map_segmentation_to_original_space(
 ) -> np.ndarray:
     """Map ROI segmentation back to patient coordinate system.
     
-    CRITICAL FUNCTION: Fixes fundamental ROI cube rendering issue.
-    Segmentation predicted in 96³ ROI space must be mapped back to original
-    patient MRI space for anatomically meaningful visualization.
+    CRITICAL FIX: Handle both ROI extraction and whole-volume downsampling cases.
+    
+    Two scenarios:
+    1. ROI extraction: Use roi_bbox to place segmentation at correct location
+    2. Whole-volume downsampling: Use scale_factors to upsample back
     
     Args:
         seg_roi: Segmentation in ROI space (96³ or multi-channel)
-        roi_metadata: Coordinate mapping info from preprocessing
+        roi_metadata: Coordinate mapping info including optional ROI bounding box
     
     Returns:
         Segmentation in original patient space
     """
+    print(f"\n🔄 Mapping segmentation to original space...")
+    print(f"   Input shape: {seg_roi.shape}, dtype: {seg_roi.dtype}")
+    print(f"   Input voxels > 0: {(seg_roi > 0).sum():,}")
+    
     # Handle multi-channel (tumor has 4 channels)
     if seg_roi.ndim == 4:
+        print(f"   Multi-channel detected: {seg_roi.shape[0]} channels")
         seg_roi = seg_roi.max(axis=0)  # Collapse to single channel
+        print(f"   After max collapse: {seg_roi.shape}, voxels > 0: {(seg_roi > 0).sum():,}")
     elif seg_roi.ndim == 3:
         if seg_roi.shape[0] <= 4:  # Channel dimension
+            print(f"   Potential channel dimension: {seg_roi.shape[0]}")
             seg_roi = seg_roi.max(axis=0)
+            print(f"   After max collapse: {seg_roi.shape}, voxels > 0: {(seg_roi > 0).sum():,}")
     
-    # Upsample to original shape using nearest-neighbor (preserves binary labels)
-    scale_factors = roi_metadata["scale_factors"]
-    seg_original = zoom(
-        seg_roi,
-        zoom=scale_factors,
-        order=0  # Nearest neighbor - critical for binary masks
-    )
-    
-    # Ensure exact shape match (zoom can be off by 1 voxel)
+    # Get ROI bounding box from metadata
+    roi_bbox = roi_metadata.get("roi_bbox")
     target_shape = roi_metadata["original_shape"]
-    if seg_original.shape != target_shape:
-        # Pad or crop to exact size
-        seg_original = resize_to_exact_shape(seg_original, target_shape)
+    
+    if roi_bbox is not None:
+        # Scenario 1: ROI extraction - place at original location
+        print(f"   ROI bbox found: {roi_bbox}")
+        seg_original = np.zeros(target_shape, dtype=np.uint8)
+        
+        # Extract bounding box slices
+        z_slice, y_slice, x_slice = roi_bbox
+        
+        # Place ROI segmentation at its original location
+        seg_original[z_slice, y_slice, x_slice] = seg_roi
+        print(f"   After bbox placement: {seg_original.shape}, voxels > 0: {(seg_original > 0).sum():,}")
+    else:
+        # Scenario 2: Whole-volume downsampling - upsample back using PyTorch F.interpolate
+        # CRITICAL: Must use same interpolation method as preprocessing (trilinear)
+        print(f"   No ROI bbox - using whole-volume upsampling (trilinear)")
+        print(f"   Target shape: {target_shape}")
+        
+        # Convert to PyTorch tensor (add batch and channel dims)
+        seg_tensor = torch.from_numpy(seg_roi.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+        print(f"   Tensor shape before interpolate: {seg_tensor.shape}")
+        
+        # Upsample using trilinear interpolation (matches preprocessing)
+        seg_upsampled = F.interpolate(
+            seg_tensor,
+            size=target_shape,
+            mode='trilinear',
+            align_corners=False
+        )
+        
+        # Convert back to numpy and threshold
+        seg_upsampled_np = seg_upsampled.squeeze().cpu().numpy()
+        
+        # Threshold at 0.5 to get binary mask
+        seg_original = (seg_upsampled_np > 0.5).astype(np.uint8)
+        
+        print(f"   After upsampling: {seg_original.shape}, voxels > 0: {(seg_original > 0).sum():,}")
     
     return seg_original.astype(np.uint8)
 
@@ -830,20 +846,26 @@ def apply_hdbet_brain_extraction(volume: np.ndarray, affine: np.ndarray, spacing
             
             print(f"✅ HD-BET completed successfully")
             
-            # Load results - HD-BET adds "_bet" suffix
-            brain_path = output_path.replace(".nii.gz", "_bet.nii.gz")
-            mask_path = output_path.replace(".nii.gz", "_bet_mask.nii.gz")
+            # Load results - HD-BET outputs brain-extracted volume
+            brain_path = output_path  # output.nii.gz
             
-            print(f"� Loading output files...")
-            print(f"   Brain: {brain_path}")
-            print(f"   Mask:  {mask_path}")
+            print(f"📂 Loading HD-BET output...")
+            print(f"   Brain volume: {brain_path}")
             
-            if not os.path.exists(brain_path) or not os.path.exists(mask_path):
-                print(f"❌ Output files not found")
+            if not os.path.exists(brain_path):
+                print(f"❌ Brain volume not found: {brain_path}")
+                print(f"   Files in temp dir: {os.listdir(tmpdir)}")
                 return None, None
             
+            # Load brain-extracted volume
             brain_volume = nib.load(brain_path).get_fdata()
-            brain_mask = nib.load(mask_path).get_fdata().astype(bool)
+            
+            # Generate binary mask from brain volume
+            # HD-BET sets non-brain voxels to 0, brain voxels to original intensity
+            brain_mask = (brain_volume > 0).astype(bool)
+            
+            print(f"✅ Brain volume loaded successfully")
+            print(f"   Generating binary mask from brain volume...")
             
             # CRITICAL: Validate brain mask
             brain_voxels = brain_mask.sum()
@@ -1292,15 +1314,26 @@ def create_3d_visualization(
         print(f"\n🔬 Processing {name} lesion...")
         print(f"   ROI space: {binary_roi.shape}")
         
-        # Apply moderate probability threshold to reduce false positives
-        PROB_THRESHOLD = 0.6  # Balanced threshold
+        # Apply STRICT probability threshold to show only high-confidence lesions
+        # CRITICAL: Model predicts diffuse probabilities across large brain regions
+        # We need very high threshold to show only focal, confident lesions
+        PROB_THRESHOLD = 0.85  # Very strict threshold for focal lesions
+        
+        print(f"\n📊 {name} Probability Distribution in ROI:")
+        print(f"   Min: {probs_roi.min():.4f}")
+        print(f"   Max: {probs_roi.max():.4f}")
+        print(f"   Mean: {probs_roi.mean():.4f}")
+        print(f"   Median: {np.median(probs_roi):.4f}")
+        print(f"   Voxels > 0.5: {(probs_roi > 0.5).sum():,} ({(probs_roi > 0.5).sum()/probs_roi.size*100:.1f}%)")
+        print(f"   Voxels > 0.7: {(probs_roi > 0.7).sum():,} ({(probs_roi > 0.7).sum()/probs_roi.size*100:.1f}%)")
+        print(f"   Voxels > 0.85: {(probs_roi > 0.85).sum():,} ({(probs_roi > 0.85).sum()/probs_roi.size*100:.1f}%)")
         
         if probs_roi.max() < PROB_THRESHOLD:
             st.info(f"ℹ️ **{name}**: Max probability {probs_roi.max():.2f} below threshold {PROB_THRESHOLD}")
             print(f"   ⚠️ Skipped: Max prob {probs_roi.max():.2f} < {PROB_THRESHOLD}")
             continue
         
-        # Re-threshold with moderate threshold
+        # Threshold with strict threshold
         if binary_roi.ndim == 4:  # Multi-channel
             binary_strict = (probs_roi > PROB_THRESHOLD).astype(np.uint8)
         else:
@@ -1659,25 +1692,33 @@ Segmentation Results:
         
         prompt = f"""{context}
 
-Generate a detailed but EDUCATIONAL radiology-style report. IMPORTANT guidelines:
-1. This is for RESEARCH/EDUCATIONAL purposes only
-2. Do NOT make diagnostic claims
-3. Use phrases like "imaging characteristics consistent with" or "patterns suggestive of"
-4. Emphasize need for clinical correlation
-5. Note that Alzheimer detection is presence-based, not volumetric
-6. Keep professional medical terminology
-7. Include limitations section
-8. Max 300 words
+Generate an educational radiology report template for research purposes that demonstrates proper medical imaging documentation standards. This report will be used to illustrate how radiologists communicate imaging findings while maintaining appropriate clinical caution and scientific accuracy. The report specifically addresses structural MRI findings, utilizing T1, T2, and FLAIR sequences to evaluate hippocampal morphology.
 
-Format:
-## FINDINGS
-[Describe detected patterns]
+Task
+The assistant should generate a sample radiology-style report that describes imaging patterns and characteristics observed on structural MRI without making definitive diagnostic claims. The report must use appropriate hedging language, emphasize the need for clinical correlation, and include a dedicated limitations section. The output should be structured in three sections: Findings, Impression, and Limitations. Focus specifically on hippocampal volume and morphological characteristics as detected on T1, T2, and FLAIR sequences.
 
-## IMPRESSION  
+Objective
+To create an educational document that demonstrates best practices in medical imaging reporting, including appropriate use of cautious language, acknowledgment of technical limitations, and the importance of multidisciplinary clinical assessment in interpreting structural MRI studies for neurodegenerative pattern recognition.
+
+Knowledge
+
+Alzheimer's disease detection in imaging is based on the presence of specific patterns (such as atrophy distribution and hippocampal morphology), not volumetric measurements alone
+Structural MRI with T1, T2, and FLAIR sequences provides complementary information: T1 sequences are optimal for anatomical detail and volumetric assessment, T2 sequences detect signal abnormalities, and FLAIR sequences suppress cerebrospinal fluid to enhance detection of subtle pathology
+Educational radiology reports must avoid diagnostic certainty and instead describe "imaging characteristics consistent with" or "patterns suggestive of" potential conditions
+All findings must emphasize the requirement for clinical correlation with patient history, cognitive testing, and other diagnostic modalities
+Professional medical terminology should be maintained throughout
+Technical limitations of structural MRI must be explicitly stated, including inability to detect microscopic pathology and dependence on sequence optimization
+The report should not exceed 300 words total
+Output Structure:
+
+FINDINGS
+[Describe detected patterns on T1, T2, and FLAIR sequences, with specific attention to hippocampal morphology]
+
+IMPRESSION
 [Clinical correlation needed statement]
 
-## LIMITATIONS
-[Technical limitations]
+LIMITATIONS
+[Technical limitations specific to structural MRI]
 """
         
         response = client.chat.completions.create(
@@ -2101,8 +2142,55 @@ def run_streamlit_app():
         st.session_state.segmentation_results = {}
     if 'original_image' not in st.session_state:
         st.session_state.original_image = None
+    if 'affine' not in st.session_state:
+        st.session_state.affine = None
+    if 'spacing' not in st.session_state:
+        st.session_state.spacing = None
+    if 'roi_metadata' not in st.session_state:
+        st.session_state.roi_metadata = {}
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
+    
+    # HD-BET AVAILABILITY CHECK (RUNS ONLY ONCE AT STARTUP)
+    if 'hdbet_available' not in st.session_state:
+        global HDBET_AVAILABLE
+        print("\n" + "=" * 60)
+        print("🔍 Checking HD-BET availability (ONE-TIME CHECK)...")
+        
+        # Configure HD-BET to use local weights
+        local_weights_path = os.path.abspath("release_v1.5.0/fold_all")
+        if os.path.exists(local_weights_path):
+            os.environ['HDBET_WEIGHTS'] = local_weights_path
+            print(f"✅ Local HD-BET weights found: {local_weights_path}")
+            print(f"   checkpoint_final.pth will be used for brain extraction")
+        
+        try:
+            result = subprocess.run(
+                ["hd-bet", "-h"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                HDBET_AVAILABLE = True
+                st.session_state.hdbet_available = True
+                print("✅ HD-BET CLI is available and working")
+                print("🎯 HD-BET will be used for medical-grade brain extraction")
+                print("   (Using local checkpoint from release_v1.5.0/)")
+            else:
+                HDBET_AVAILABLE = False
+                st.session_state.hdbet_available = False
+                print("❌ HD-BET CLI returned error")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            HDBET_AVAILABLE = False
+            st.session_state.hdbet_available = False
+            print(f"❌ HD-BET CLI not found: {e}")
+            print("⚠️  3D brain surface rendering will be DISABLED")
+        
+        print("=" * 60 + "\n")
+    else:
+        # Use cached value
+        HDBET_AVAILABLE = st.session_state.hdbet_available
     
     # Premium Header with Navigation
     st.markdown("""
@@ -2280,7 +2368,118 @@ def run_streamlit_app():
                     </div>
                     """, unsafe_allow_html=True)
             
+            # Comprehensive Clinical Metrics Section
+            st.markdown("---")
+            st.markdown("""
+            <div class="glass-card">
+                <h3 style="color: #00E5FF; margin-bottom: 20px;">📊 Comprehensive Clinical Metrics</h3>
+                <p style="color: #94A3B8; font-size: 13px;">Detailed performance metrics for each disease classification</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Calculate comprehensive metrics for each disease
+            for disease in ["tumor", "stroke", "alzheimer"]:
+                disease_name = DISEASE_COLORS[disease]["name"]
+                disease_color = DISEASE_COLORS[disease]["hex"]
+                prob = probs[disease]
+                is_detected = disease in detected
+                
+                # Get uncertainty if available
+                uncertainty = det.get("uncertainties", {}).get(disease, 0.0)
+                
+                # Display metrics in expandable section
+                with st.expander(f"📈 {disease_name} - Detection Metrics", expanded=is_detected):
+                    st.markdown(f"""
+                    <div class="glass-card">
+                        <p style="color: #94A3B8; font-size: 13px; margin-bottom: 15px;">
+                            ⚠️ <b>Note:</b> Comprehensive performance metrics (Sensitivity, Specificity, PPV, NPV) 
+                            require validation against ground truth labels. The values shown below are the model's 
+                            confidence scores from inference.
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Model Confidence", f"{prob:.1%}", 
+                                 help="Raw probability output from the neural network")
+                        st.metric("Detection Status", "POSITIVE" if is_detected else "NEGATIVE",
+                                 help=f"Threshold: {PRESENCE_THRESHOLD:.0%}")
+                    
+                    with col2:
+                        st.metric("Uncertainty (MC Dropout)", f"{uncertainty:.3f}",
+                                 help="Epistemic uncertainty from Monte Carlo Dropout sampling")
+                        st.metric("Confidence Level", 
+                                 "High" if prob > 0.8 else "Medium" if prob > 0.6 else "Low" if prob > 0.4 else "Very Low",
+                                 help="Qualitative assessment of prediction confidence")
+                    
+                    with col3:
+                        # Calculate confidence interval
+                        lower_bound = max(0, prob - 1.96 * uncertainty)
+                        upper_bound = min(1, prob + 1.96 * uncertainty)
+                        st.metric("95% CI Lower", f"{lower_bound:.1%}",
+                                 help="Lower bound of 95% confidence interval")
+                        st.metric("95% CI Upper", f"{upper_bound:.1%}",
+                                 help="Upper bound of 95% confidence interval")
+                    
+                    # Confidence visualization
+                    import plotly.graph_objects as go
+                    conf_fig = go.Figure()
+                    
+                    # Add confidence bar
+                    conf_fig.add_trace(go.Bar(
+                        x=['Confidence'],
+                        y=[prob],
+                        marker=dict(color=disease_color),
+                        text=[f"{prob:.1%}"],
+                        textposition='outside',
+                        name='Model Output'
+                    ))
+                    
+                    # Add threshold line
+                    conf_fig.add_hline(y=PRESENCE_THRESHOLD, line_dash="dash", 
+                                      line_color="#00FFFF", 
+                                      annotation_text=f"Detection Threshold ({PRESENCE_THRESHOLD:.0%})",
+                                      annotation_font_color="#00FFFF")
+                    
+                    # Add uncertainty range
+                    if uncertainty > 0:
+                        conf_fig.add_trace(go.Scatter(
+                            x=['Confidence', 'Confidence'],
+                            y=[lower_bound, upper_bound],
+                            mode='lines',
+                            line=dict(color='rgba(255,255,255,0.3)', width=20),
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
+                    
+                    conf_fig.update_layout(
+                        title=f"{disease_name} - Model Confidence",
+                        yaxis=dict(title="Probability", range=[0, 1]),
+                        height=300,
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color='#E5E7EB'),
+                        showlegend=False
+                    )
+                    st.plotly_chart(conf_fig, use_container_width=True)
+                    
+                    # Additional information
+                    st.markdown(f"""
+                    <div class="glass-card">
+                        <h4 style="color: {disease_color};">Clinical Interpretation</h4>
+                        <p style="color: #94A3B8; font-size: 13px;">
+                            • <b>Confidence: {prob:.1%}</b> - Model's belief that {disease_name.lower()} is present<br>
+                            • <b>Uncertainty: {uncertainty:.3f}</b> - Model's uncertainty about this prediction<br>
+                            • <b>Status: {'DETECTED' if is_detected else 'NOT DETECTED'}</b> - Based on {PRESENCE_THRESHOLD:.0%} threshold<br>
+                            • <b>Recommendation:</b> {'Expert review recommended for confirmation' if is_detected else 'Continue monitoring if clinical suspicion exists'}
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
             # Chart
+            st.markdown("---")
             st.plotly_chart(create_statistical_summary(det, {}), use_container_width=True)
             
             # Detected Diseases
