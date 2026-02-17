@@ -213,6 +213,136 @@ python run_evaluation_test.py
 
 ---
 
+
+---
+
+## 🏗️ System Architecture
+
+### 🧠 NeuroX Model Architecture
+
+The core of NeuroX is a multi-head 3D Convolutional Neural Network with a Transformer bottleneck, designed for simultaneous multi-disease detection and segmentation.
+
+```mermaid
+classDiagram
+    direction TB
+    
+    class StreamlitApp {
+        +run_streamlit_app()
+        +render_ui()
+    }
+    
+    class Preprocessing {
+        +load_and_preprocess_nifti()
+        +apply_hdbet_brain_extraction()
+        +generate_brain_mask_otsu()
+    }
+    
+    class NeuroXModel {
+        +SharedEncoder (CNN + Transformer)
+        +PresenceHeads (Tumor, Stroke, Alzheimer)
+        +SegmentationDecoders (Tumor, Stroke)
+        +forward(x)
+        +detect_presence()
+        +segment_lesions()
+    }
+
+    class SharedEncoder {
+        +Conv3DBlocks
+        +TransformerBottleneck3D
+        +InstanceNorm3D
+    }
+    
+    class InferencePipeline {
+        +automatic_disease_detection()
+        +perform_segmentation()
+        +uncertainty_quantification(MC Dropout)
+    }
+
+    class Visualization {
+        +create_3d_visualization()
+        +create_slice_view()
+        +map_segmentation_to_original_space()
+    }
+    
+    StreamlitApp --> Preprocessing : 1. Load NIfTI
+    StreamlitApp --> InferencePipeline : 2. Run Analysis
+    InferencePipeline --> NeuroXModel : Uses
+    NeuroXModel *-- SharedEncoder : Feature Extraction
+    NeuroXModel *-- PresenceHeads : Classification
+    NeuroXModel *-- SegmentationDecoders : Localisation
+    StreamlitApp --> Visualization : 3. Render 3D/2D
+```
+
+### 🔄 Application Workflow
+
+The following flowchart illustrates the complete user journey from MRI upload to report generation, highlighting the conditional logic for different disease types and processing steps.
+
+```mermaid
+flowchart TD
+    Start([🚀 Start Application]) --> Upload{📂 Upload NIfTI}
+    Upload -->|Valid File| Preprocess[⚙️ Preprocessing]
+    
+    subgraph Preprocessing_Stage [Image Processing]
+        Preprocess --> Normalize[Z-Score Normalization]
+        Normalize --> ROI[Extract 96³ ROI Tensor]
+        Normalize --> Affine[Extract Affine Matrix & Spacing]
+    end
+    
+    ROI --> Inference[🧠 NeuroX AI Inference]
+    
+    subgraph AI_Engine [NeuroX Multi-Disease Model]
+        Inference --> Encoder[Shared 3D Encoder]
+        Encoder --> Bottleneck[Transformer Bottleneck]
+        
+        Bottleneck --> Head1[Tumor Presence Head]
+        Bottleneck --> Head2[Stroke Presence Head]
+        Bottleneck --> Head3[Alzheimer Presence Head]
+        
+        Head1 -->|Context Vector| Seg1[Tumor Segmentation Decoder]
+        Head2 -->|Context Vector| Seg2[Stroke Segmentation Decoder]
+    end
+    
+    Head1 -->|Logits| Prob1{Tumor Detected?}
+    Head2 -->|Logits| Prob2{Stroke Detected?}
+    Head3 -->|Logits| Prob3{Alzheimer Detected?}
+    
+    subgraph Post_Processing [Analysis & Refinement]
+        Prob1 -->|Yes| Mask1[Generate Tumor Mask]
+        Prob2 -->|Yes| Mask2[Generate Stroke Mask]
+        Prob3 -->|Yes| NoSeg[No Segmentation (Alzheimer)]
+        
+        Mask1 --> Clean1[Morphological Cleaning]
+        Mask2 --> Clean2[Morphological Cleaning]
+        
+        Clean1 --> Map1[Map to Patient Space]
+        Clean2 --> Map2[Map to Patient Space]
+    end
+    
+    Preprocess --> SkullStrip{HD-BET Available?}
+    SkullStrip -->|Yes| HDBET[Medical-Grade Extraction]
+    SkullStrip -->|No| Fail[3D Visualization Disabled]
+    
+    HDBET --> BrainSurf[Generate Brain Surface Mesh]
+    
+    Map1 --> VizScene[Assemble 3D Scene]
+    Map2 --> VizScene
+    NoSeg --> VizScene
+    BrainSurf --> VizScene
+    
+    VizScene --> Dashboard[📊 Clinical Dashboard]
+    Fail -.-> Dashboard
+    
+    Dashboard --> ReportGen{📄 Generate Report}
+    
+    ReportGen -->|Groq AI| AI_Text[AI Clinical Summary]
+    ReportGen -->|ReportLab| PDF[Export PDF Report]
+    
+    AI_Text --> End([✅ End Session])
+    PDF --> End
+```
+
+---
+
 ## 📁 Project Structure
 
 ```
