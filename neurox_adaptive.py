@@ -10,7 +10,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import numpy as np
+import numpy as np
 import nibabel as nib
+from nibabel.processing import resample_from_to
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -72,8 +74,10 @@ if DETERMINISTIC_MODE:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
 PRESENCE_THRESHOLD = 0.5
-MODEL_PATH = r"C:\Users\karth\OneDrive\Desktop\neurox\neurox_multihead_final.pth"
-ASSET_DIR = Path("./assets/brain")
+# Dynamic Path Configuration
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "neurox_multihead_final.pth"
+ASSET_DIR = BASE_DIR / "assets" / "brain"
 
 # Disease Configuration
 DISEASE_COLORS = {
@@ -361,16 +365,47 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
     mean, std = data.mean(), data.std() + 1e-8
     data_normalized = np.clip((data - mean) / std, -5, 5)
     
-    # Prepare ROI tensor for inference
-    data_normalized = data_normalized[np.newaxis, ...]
-    roi_tensor = torch.from_numpy(data_normalized).unsqueeze(0).float()
-    roi_tensor = F.interpolate(roi_tensor, size=ROI_SIZE, mode='trilinear', align_corners=False)
+    # -------------------------------------------------
+    # STEP 1 — PAD TO CUBE (CENTERED)
+    # -------------------------------------------------
+    max_dim = max(original_shape)
     
-    # Store ROI metadata for coordinate mapping
+    pad_d = max_dim - original_shape[0]
+    pad_h = max_dim - original_shape[1]
+    pad_w = max_dim - original_shape[2]
+    
+    # Store padding precisely as tuple of (before, after)
+    padding = (
+        (pad_d // 2, pad_d - pad_d // 2),
+        (pad_h // 2, pad_h - pad_h // 2),
+        (pad_w // 2, pad_w - pad_w // 2),
+    )
+    
+    volume_padded = np.pad(data_normalized, padding, mode='constant', constant_values=data_normalized.min())
+    padded_shape = volume_padded.shape
+    
+    # -------------------------------------------------
+    # STEP 2 — RESIZE TO MODEL INPUT (96^3)
+    # -------------------------------------------------
+    scale_factor = ROI_SIZE[0] / max_dim
+    
+    volume_tensor = torch.tensor(volume_padded, dtype=torch.float32)
+    volume_tensor = volume_tensor.unsqueeze(0).unsqueeze(0)
+    
+    # Forward: Trilinear for continuous data
+    roi_tensor = F.interpolate(
+        volume_tensor,
+        size=ROI_SIZE,
+        mode='trilinear',
+        align_corners=False
+    )
+    
+    # Store ROI metadata for EXACT inverse mapping
     roi_metadata = {
-        "original_shape": tuple(original_shape[:3]) if original_data.ndim == 4 else original_shape,
-        "roi_shape": ROI_SIZE,
-        "scale_factors": tuple(np.array(original_shape[:3]) / np.array(ROI_SIZE)),
+        "original_shape": tuple(original_shape) if original_data.ndim == 3 else tuple(original_shape[:3]),
+        "padded_shape": padded_shape,
+        "padding": padding,  # ( (d_pre, d_post), (h_pre, h_post), (w_pre, w_post) )
+        "scale_factor": scale_factor,
         "interpolation_mode": "trilinear"
     }
     
@@ -591,78 +626,101 @@ def map_segmentation_to_original_space(
     seg_roi: np.ndarray,
     roi_metadata: Dict
 ) -> np.ndarray:
-    """Map ROI segmentation back to patient coordinate system.
-    
-    CRITICAL FIX: Handle both ROI extraction and whole-volume downsampling cases.
-    
-    Two scenarios:
-    1. ROI extraction: Use roi_bbox to place segmentation at correct location
-    2. Whole-volume downsampling: Use scale_factors to upsample back
-    
-    Args:
-        seg_roi: Segmentation in ROI space (96³ or multi-channel)
-        roi_metadata: Coordinate mapping info including optional ROI bounding box
-    
-    Returns:
-        Segmentation in original patient space
+    """
+    Inverse transform:
+    1. Upsample 96^3 -> padded cube (Nearest Neighbor)
+    2. Remove padding -> original shape (Exact Crop)
     """
     print(f"\n🔄 Mapping segmentation to original space...")
     print(f"   Input shape: {seg_roi.shape}, dtype: {seg_roi.dtype}")
-    print(f"   Input voxels > 0: {(seg_roi > 0).sum():,}")
     
     # Handle multi-channel (tumor has 4 channels)
     if seg_roi.ndim == 4:
-        print(f"   Multi-channel detected: {seg_roi.shape[0]} channels")
         seg_roi = seg_roi.max(axis=0)  # Collapse to single channel
-        print(f"   After max collapse: {seg_roi.shape}, voxels > 0: {(seg_roi > 0).sum():,}")
-    elif seg_roi.ndim == 3:
-        if seg_roi.shape[0] <= 4:  # Channel dimension
-            print(f"   Potential channel dimension: {seg_roi.shape[0]}")
-            seg_roi = seg_roi.max(axis=0)
-            print(f"   After max collapse: {seg_roi.shape}, voxels > 0: {(seg_roi > 0).sum():,}")
-    
-    # Get ROI bounding box from metadata
-    roi_bbox = roi_metadata.get("roi_bbox")
-    target_shape = roi_metadata["original_shape"]
-    
-    if roi_bbox is not None:
-        # Scenario 1: ROI extraction - place at original location
-        print(f"   ROI bbox found: {roi_bbox}")
-        seg_original = np.zeros(target_shape, dtype=np.uint8)
-        
-        # Extract bounding box slices
-        z_slice, y_slice, x_slice = roi_bbox
-        
-        # Place ROI segmentation at its original location
-        seg_original[z_slice, y_slice, x_slice] = seg_roi
-        print(f"   After bbox placement: {seg_original.shape}, voxels > 0: {(seg_original > 0).sum():,}")
-    else:
-        # Scenario 2: Whole-volume downsampling - upsample back using PyTorch F.interpolate
-        # CRITICAL: Must use same interpolation method as preprocessing (trilinear)
-        print(f"   No ROI bbox - using whole-volume upsampling (trilinear)")
-        print(f"   Target shape: {target_shape}")
-        
-        # Convert to PyTorch tensor (add batch and channel dims)
+    elif seg_roi.ndim == 3 and seg_roi.shape[0] <= 4:
+        seg_roi = seg_roi.max(axis=0)
+
+    # Validate metadata
+    if "padded_shape" not in roi_metadata:
+        print("⚠️ Legacy metadata detected - using fallback upsampling")
+        # Legacy fallback (blind upsampling)
+        target_shape = roi_metadata["original_shape"]
         seg_tensor = torch.from_numpy(seg_roi.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-        print(f"   Tensor shape before interpolate: {seg_tensor.shape}")
-        
-        # Upsample using trilinear interpolation (matches preprocessing)
-        seg_upsampled = F.interpolate(
-            seg_tensor,
-            size=target_shape,
-            mode='trilinear',
-            align_corners=False
-        )
-        
-        # Convert back to numpy and threshold
-        seg_upsampled_np = seg_upsampled.squeeze().cpu().numpy()
-        
-        # Threshold at 0.5 to get binary mask
-        seg_original = (seg_upsampled_np > 0.5).astype(np.uint8)
-        
-        print(f"   After upsampling: {seg_original.shape}, voxels > 0: {(seg_original > 0).sum():,}")
+        seg_upsampled = F.interpolate(seg_tensor, size=target_shape, mode='nearest')
+        return (seg_upsampled.squeeze().cpu().numpy() > 0.5).astype(np.uint8)
+
+    padded_shape = roi_metadata["padded_shape"]
+    padding = roi_metadata.get("padding", roi_metadata.get("pad_width"))  # handle both keys
+    original_shape = roi_metadata["original_shape"]
+
+    # -------------------------------------------------
+    # STEP 1 — INVERSE RESIZE (Nearest Neighbor)
+    # -------------------------------------------------
+    seg_tensor = torch.tensor(seg_roi, dtype=torch.float32)
+    # Ensure 5D tensor [B, C, D, H, W]
+    while seg_tensor.ndim < 5:
+        seg_tensor = seg_tensor.unsqueeze(0)
+
+    # Inverse: Nearest Neighbor for masks (CRITICAL)
+    seg_up = F.interpolate(
+        seg_tensor,
+        size=padded_shape,
+        mode="nearest"
+    )
+
+    seg_cube = seg_up.squeeze().cpu().numpy()
+
+    # -------------------------------------------------
+    # STEP 2 — REMOVE PADDING (EXACT INVERSE)
+    # -------------------------------------------------
+    d0, d1 = padding[0]
+    h0, h1 = padding[1]
+    w0, w1 = padding[2]
+
+    # Calculate end indices
+    d_end = padded_shape[0] - d1
+    h_end = padded_shape[1] - h1
+    w_end = padded_shape[2] - w1
+
+    seg_original = seg_cube[
+        d0:d_end,
+        h0:h_end,
+        w0:w_end
+    ]
+
+    # Threshold if needed
+    seg_original = (seg_original > 0.5).astype(np.uint8)
     
+    print(f"   Original shape (target): {original_shape}")
+    print(f"   Recovered shape: {seg_original.shape}")
+    
+    # Safety check
+    if seg_original.shape != original_shape:
+         print(f"⚠️ Shape mismatch: {seg_original.shape} vs {original_shape}")
+         # Final safety crop/pad if off by 1 voxel due to odd padding
+         seg_original = resize_to_exact_shape(seg_original, original_shape)
+
     return seg_original.astype(np.uint8)
+
+
+def validate_alignment(segmentation_mask: np.ndarray, brain_mask: np.ndarray) -> None:
+    """Validate spatial alignment between segmentation and brain mask."""
+    if segmentation_mask.sum() == 0:
+        print("⚠️ Segmentation empty — skipping validation.")
+        return
+
+    if brain_mask is None:
+        return
+
+    overlap = (segmentation_mask & brain_mask).sum()
+    ratio = overlap / (segmentation_mask.sum() + 1e-6)
+
+    print(f"   🔍 Alignment Check: {ratio * 100:.2f}% of lesion inside brain")
+
+    if ratio < 0.80:
+        print("   ⚠️ WARNING: Possible spatial misalignment detected (< 80% overlap)")
+    else:
+        print("   ✅ Segmentation spatially consistent")
 
 
 def resize_to_exact_shape(volume: np.ndarray, target_shape: Tuple) -> np.ndarray:
@@ -774,7 +832,6 @@ def generate_patient_brain_surface(
         verts, faces, normals, _ = measure.marching_cubes(
             brain_smooth,
             level=0.5,
-            spacing=spacing
         )
     except (ValueError, RuntimeError) as e:
         raise RuntimeError(f"Brain surface generation failed: {e}")
@@ -858,7 +915,35 @@ def apply_hdbet_brain_extraction(volume: np.ndarray, affine: np.ndarray, spacing
                 return None, None
             
             # Load brain-extracted volume
-            brain_volume = nib.load(brain_path).get_fdata()
+            brain_img = nib.load(brain_path)
+            brain_volume = brain_img.get_fdata()
+            brain_affine = brain_img.affine
+            
+            # -------------------------------------------------
+            # MASTER GRID ALIGNMENT CHECK
+            # -------------------------------------------------
+            # HD-BET might output different affine or shape if it reorients
+            # We strictly enforce the original input geometry (Master Grid)
+            
+            input_shape = volume.shape
+            if brain_volume.shape != input_shape or not np.allclose(brain_affine, affine, atol=1e-3):
+                print(f"⚠️ HD-BET output geometry drift detected!")
+                print(f"   Input: {input_shape} | Output: {brain_volume.shape}")
+                print(f"   Resampling brain mask back to Master Grid geometry...")
+                
+                # Master geometry defined by (input_shape, affine)
+                # We need a reference NIfTI image for resampling
+                target_img = nib.Nifti1Image(np.zeros(input_shape), affine)
+                
+                # Resample (Nearest neighbor order=0 for masks/labels)
+                brain_resampled_img = resample_from_to(
+                    brain_img,
+                    target_img,
+                    order=0  # Nearest neighbor
+                )
+                
+                brain_volume = brain_resampled_img.get_fdata()
+                print(f"✅ Resampling complete. Brain mask now aligned to Master Grid.")
             
             # Generate binary mask from brain volume
             # HD-BET sets non-brain voxels to 0, brain voxels to original intensity
@@ -1397,7 +1482,13 @@ def create_3d_visualization(
         seg_original = map_segmentation_to_original_space(binary_strict, roi_metadata)
         print(f"   Original space: {seg_original.shape}, {seg_original.sum():,} voxels")
         
-        # Crop to brain bounding box if available
+        # -------------------------------------------------
+        # ALIGNMENT VALIDATION (FULL MASTER GRID)
+        # -------------------------------------------------
+        # Strictly validate against FULL brain mask BEFORE any cropping
+        validate_alignment(seg_original, brain_mask)
+        
+        # Crop to brain bounding box ONLY AFTER validation
         if brain_bbox is not None:
             seg_original = seg_original[brain_bbox]
             print(f"   After bbox crop: {seg_original.shape}, {seg_original.sum():,} voxels")
@@ -1459,8 +1550,7 @@ def create_3d_visualization(
             # GOLD-STANDARD: Marching cubes WITH spacing (same as brain)
             verts, faces, normals, _ = measure.marching_cubes(
                 seg_smooth,
-                level=0.5,
-                spacing=spacing  # Physical mm coordinates
+                level=0.5,  # Physical mm coordinates
             )
             
             print(f"   Marching cubes: {len(verts):,} vertices, {len(faces):,} faces")
@@ -2232,9 +2322,9 @@ def run_streamlit_app():
         print("🔍 Checking HD-BET availability (ONE-TIME CHECK)...")
         
         # Configure HD-BET to use local weights
-        local_weights_path = os.path.abspath("release_v1.5.0/fold_all")
+        local_weights_path = BASE_DIR / "release_v1.5.0" / "fold_all"
         if os.path.exists(local_weights_path):
-            os.environ['HDBET_WEIGHTS'] = local_weights_path
+            os.environ['HDBET_WEIGHTS'] = str(local_weights_path)
             print(f"✅ Local HD-BET weights found: {local_weights_path}")
             print(f"   checkpoint_final.pth will be used for brain extraction")
         
