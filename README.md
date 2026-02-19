@@ -99,7 +99,7 @@ Get the system running in under 5 minutes:
 - **3D CNN Encoder** - Shared feature extraction (`enc1`→`enc2`→`enc3`→`bottleneck`)
 - **Transformer Bottleneck** - Global context modeling (depth=4, heads=8, mlp=256)
 - **Tumor & Stroke PresenceHeads** - Bottleneck → AdaptiveAvgPool → FC classifier
-- **Alzheimer Global Branch** - `enc3` → `alz_pool` → `LayerNorm(128)` → `alz_classifier` (parallel, decoupled)
+- **AlzheimerEncoder** - Raw MRI → 3× Conv3D blocks → dual pool (avg+max, 256-dim) → MLP → logit (fully independent)
 - **Attention-Gated U-Net Decoders** - Tumor (3-class) and Stroke (binary) segmentation
 - **InstanceNorm3d** - Normalization for small-batch stability
 - **Metrics-embedded Checkpoints** - `ferrari_model.pth` stores weights + full training history
@@ -249,7 +249,7 @@ python run_evaluation_test.py
 
 ### 🧠 NeuroX Ferrari Model Architecture
 
-The core of NeuroX is the **Ferrari Architecture** — a multi-task 3D CNN with a Transformer bottleneck and a **decoupled Alzheimer global branch** that reads directly from `enc3` features, bypassing the bottleneck to eliminate gradient conflicts with segmentation tasks.
+The core of NeuroX is the **Ferrari Architecture** — a multi-task 3D CNN with a Transformer bottleneck and a **dedicated AlzheimerEncoder** that takes raw MRI directly, completely independent of the shared segmentation path. This eliminates all gradient conflicts between segmentation and Alzheimer detection at the encoder level.
 
 ```mermaid
 classDiagram
@@ -295,13 +295,16 @@ classDiagram
         +AdaptiveAvgPool3d → Linear(128,64) → Linear(64,1)
     }
 
-    class AlzheimerGlobalBranch {
-        +Input: enc3 features [128ch]
-        +alz_pool AdaptiveAvgPool3d(1)
-        +alz_norm LayerNorm(128)
-        +alz_classifier Linear(128→64→1)
-        +PARALLEL to Bottleneck
-        +No gradient conflicts
+    class AlzheimerEncoder {
+        +Input: Raw MRI [B, 1, D, H, W]
+        +Block1 Conv3d(1→32) MaxPool3d
+        +Block2 Conv3d(32→64) MaxPool3d
+        +Block3 Conv3d(64→128)
+        +AvgPool3d + MaxPool3d → concat [B,256]
+        +LayerNorm(256)
+        +MLP Linear(256→128→1)
+        +FULLY INDEPENDENT of SharedEncoder
+        +No shared features with segmentation
     }
 
     class SegmentationDecoders {
@@ -315,7 +318,7 @@ classDiagram
     class InferencePipeline {
         +automatic_disease_detection()
         +Tumor/Stroke via PresenceHeads
-        +Alzheimer via AlzheimerGlobalBranch
+        +Alzheimer via AlzheimerEncoder
         +MC-Dropout uncertainty per disease
         +perform_segmentation()
     }
@@ -345,15 +348,14 @@ classDiagram
     InferencePipeline --> SharedEncoder : encoder features
     SharedEncoder *-- TransformerBottleneck3D : bottleneck
     InferencePipeline --> PresenceHeads : tumor + stroke
-    InferencePipeline --> AlzheimerGlobalBranch : alzheimer only
-    SharedEncoder --> AlzheimerGlobalBranch : enc3 direct
+    InferencePipeline --> AlzheimerEncoder : alzheimer only
     InferencePipeline --> SegmentationDecoders : if detected
     StreamlitApp --> TrainingPerformanceDashboard : Analysis page
 ```
 
 ### 🔄 Application Workflow
 
-The following flowchart illustrates the complete pipeline from MRI upload to report generation, including the **Ferrari routing** where Alzheimer detection uses the parallel global branch (not the Transformer bottleneck).
+The following flowchart illustrates the complete pipeline from MRI upload to report generation, including the **Ferrari routing** where Alzheimer detection uses the **independent AlzheimerEncoder** that receives raw MRI — completely separate from the SharedEncoder used for Tumor/Stroke.
 
 ```mermaid
 flowchart TD
@@ -384,11 +386,14 @@ flowchart TD
 
         Encoder -->|bottleneck features| TumorHead["Tumor PresenceHead\nBottleneck → Pool → FC"]
         Encoder -->|bottleneck features| StrokeHead["Stroke PresenceHead\nBottleneck → Pool → FC"]
-        Encoder -->|enc3 DIRECT| AlzBranch["🧬 Alzheimer Global Branch\nenc3 → alz_pool → LayerNorm → alz_classifier\n⚡ Parallel — no gradient conflict"]
+
+        RawMRI["📥 Raw MRI Input"] -->|independent path| AlzBranch["🧬 AlzheimerEncoder\nRaw MRI → 3×Conv3D → DualPool → MLP\n⚡ Fully Independent — zero shared features"]
 
         TumorHead -->|logit| TumorSeg["Tumor Seg Decoder\n3-class output"]
         StrokeHead -->|logit| StrokeSeg["Stroke Seg Decoder\n1-class output"]
     end
+
+    Preprocessing_Stage --> RawMRI
 
     TumorHead --> ProbT{Tumor Detected?}
     StrokeHead --> ProbS{Stroke Detected?}
