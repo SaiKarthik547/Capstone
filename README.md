@@ -247,196 +247,257 @@ python run_evaluation_test.py
 
 ## 🏗️ System Architecture
 
-### 🧠 NeuroX Ferrari Model Architecture
+### 🧠 NeuroX Ferrari Model — Overview
 
-The core of NeuroX is the **Ferrari Architecture** — a multi-task 3D CNN with a Transformer bottleneck and a **dedicated AlzheimerEncoder** that takes raw MRI directly, completely independent of the shared segmentation path. This eliminates all gradient conflicts between segmentation and Alzheimer detection at the encoder level.
+The **Ferrari Architecture** is a unified multi-task 3D model that detects and segments three neurological diseases in a single joint training run.
+
+**Design philosophy:**
+- **Tumor & Stroke** → share a `SharedEncoder` (3D CNN + Transformer bottleneck) with dedicated Attention-Gated U-Net decoders for voxel segmentation and lightweight `PresenceHead` classifiers.
+- **Alzheimer's** → a **fully independent `AlzheimerEncoder`** receives raw MRI directly — zero shared parameters with the segmentation path, eliminating all gradient conflicts.
 
 ```mermaid
 classDiagram
     direction TB
 
-    class StreamlitApp {
-        +run_streamlit_app()
-        +Upload Page
-        +Analysis Page
-        +Visualization Page
-        +Reports Page
-        +Settings Page
-    }
-
-    class LoadModel {
-        +load_model(model_path)
-        +detect checkpoint format()
-        +load model_state weights()
-        +store training_metrics in session()
-        +graceful legacy fallback()
+    class NeuroXMultiDisease {
+        +SharedEncoder encoder
+        +ModuleDict presence_heads: tumor and stroke
+        +ModuleDict seg_decoders: tumor and stroke
+        +AlzheimerEncoder alz_encoder
+        +forward(x, active_presence, active_seg) dict
+        +Selective: only activates heads needed per batch
+        +Multi-task: joint detection and segmentation
     }
 
     class SharedEncoder {
-        +Conv3D Block 1 → enc1 [32ch]
-        +Conv3D Block 2 → enc2 [64ch]
-        +Conv3D Block 3 → enc3 [128ch]
-        +TransformerBottleneck3D → bottleneck
-        +InstanceNorm3d affine=True
-        +forward(x) dict
+        +in_channels = 1
+        +enc1: Conv3d(1to32 k3 p1) x2 + InstanceNorm3d + ReLU
+        +enc1 output: [B, 32, 96, 96, 96]
+        +pool1: MaxPool3d(2) output [B, 32, 48, 48, 48]
+        +enc2: Conv3d(32to64 k3 p1) x2 + InstanceNorm3d + ReLU
+        +enc2 output: [B, 64, 48, 48, 48]
+        +pool2: MaxPool3d(2) output [B, 64, 24, 24, 24]
+        +enc3: Conv3d(64to128 k3 p1) x2 + InstanceNorm3d + ReLU
+        +enc3 output: [B, 128, 24, 24, 24]
+        +pool3: MaxPool3d(2) output [B, 128, 12, 12, 12]
+        +bottleneck: TransformerBottleneck3D
+        +bottleneck output: [B, 128, 12, 12, 12]
+        +forward(x) returns dict: enc1 enc2 enc3 bottleneck
+        +InstanceNorm3d affine=True stable at batch_size=1
     }
 
     class TransformerBottleneck3D {
-        +dim=128 depth=4 heads=8
-        +mlp_dim=256 dropout=0.1
-        +LayerNorm + MultiheadAttention
-        +4x Transformer blocks
+        +dim=128 depth=4 heads=8 mlp_dim=256 dropout=0.1
+        +step1: reshape [B,128,12,12,12] to [B,1728,128]
+        +token count = 12x12x12 = 1728 spatial positions
+        +4x Pre-norm Transformer block repeated depth times
+        +block_attn: LayerNorm then MHA(heads=8 dropout=0.1) then residual
+        +block_ffn: LayerNorm then Linear(128to256) then GELU then Dropout then Linear(256to128) then residual
+        +step2: reshape [B,1728,128] back to [B,128,12,12,12]
+        +captures long-range voxel dependencies across full volume
     }
 
     class PresenceHeads {
-        +tumor PresenceHead(128)
-        +stroke PresenceHead(128)
-        +Input: bottleneck features
-        +AdaptiveAvgPool3d → Linear(128,64) → Linear(64,1)
+        +tumor: PresenceHead(in_features=128)
+        +stroke: PresenceHead(in_features=128)
+        +INPUT: bottleneck [B, 128, 12, 12, 12]
+        +AdaptiveAvgPool3d(1) then Flatten gives [B, 128]
+        +Linear(128 to 64) then ReLU then Dropout(p=0.3)
+        +Linear(64 to 1) gives logit scalar [B, 1]
+        +loss: BCEWithLogitsLoss
+        +inference: sigmoid(logit) >= 0.5 means disease present
+        +uncertainty_forward(bottleneck n_samples=10)
+        +MC-Dropout: Dropout stays active for 10 stochastic passes
+        +returns mean_prob and std as epistemic uncertainty estimate
     }
 
     class AlzheimerEncoder {
-        +Input: Raw MRI [B, 1, D, H, W]
-        +Block1 Conv3d(1→32) MaxPool3d
-        +Block2 Conv3d(32→64) MaxPool3d
-        +Block3 Conv3d(64→128)
-        +AvgPool3d + MaxPool3d → concat [B,256]
-        +LayerNorm(256)
-        +MLP Linear(256→128→1)
-        +FULLY INDEPENDENT of SharedEncoder
-        +No shared features with segmentation
+        +FULLY INDEPENDENT: zero shared params with SharedEncoder
+        +INPUT: Raw MRI tensor [B, 1, 96, 96, 96]
+        +block1: Conv3d(1to32 k3 p1 bias=False) x2 + InstanceNorm3d + ReLU
+        +pool1: MaxPool3d(2) output [B, 32, 48, 48, 48]
+        +block2: Conv3d(32to64 k3 p1 bias=False) x2 + InstanceNorm3d + ReLU
+        +pool2: MaxPool3d(2) output [B, 64, 24, 24, 24]
+        +block3: Conv3d(64to128 k3 p1 bias=False) x2 + InstanceNorm3d + ReLU
+        +NO pool3: keeps [B, 128, 24, 24, 24] for dual pooling
+        +avg_pool: AdaptiveAvgPool3d(1) flatten gives [B, 128]
+        +max_pool: AdaptiveMaxPool3d(1) flatten gives [B, 128]
+        +concat: torch.cat([avg max] dim=1) gives [B, 256]
+        +AvgPool: captures global cortical atrophy signal
+        +MaxPool: captures focal hippocampal degeneration peaks
+        +norm: LayerNorm(256)
+        +classifier: Linear(256to128) then GELU then Dropout(0.4) then Linear(128to1)
+        +MC-Dropout: classifier.train() for 10 passes gives mean_prob and std
+        +loss: BCEWithLogitsLoss(pos_weight=N_neg_div_N_pos)
+    }
+
+    class AttentionGate3D {
+        +W_gate: Conv3d(gate_ch to inter_ch kernel=1)
+        +W_skip: Conv3d(skip_ch to inter_ch kernel=1)
+        +psi:    Conv3d(inter_ch to 1 kernel=1)
+        +forward: W_gate(g) + W_skip(s) then ReLU then psi then Sigmoid gives alpha
+        +output:  skip_features multiplied by alpha spatially re-weighted
+        +att3: gate_ch=128 skip_ch=128 inter_ch=64 spatial scale 12to24
+        +att2: gate_ch=64  skip_ch=64  inter_ch=32 spatial scale 24to48
+        +att1: gate_ch=32  skip_ch=32  inter_ch=16 spatial scale 48to96
     }
 
     class SegmentationDecoders {
-        +tumor SegmentationDecoder [3-class]
-        +stroke SegmentationDecoder [1-class]
-        +AttentionGate3D skip connections
-        +ConvTranspose3d upsampling
-        +NO Alzheimer decoder
+        +tumor decoder: output_channels=3 classes are ET NCR ED
+        +stroke decoder: output_channels=1 binary infarct mask
+        +up3: ConvTranspose3d(128to128 k=2 stride=2) gives [B,128,24,24,24]
+        +att3: AttentionGate3D on enc3 [B,128,24,24,24]
+        +dec3: Conv3d(256to128 k3) x2 InstanceNorm ReLU concat channels=256
+        +up2: ConvTranspose3d(128to64  k=2 stride=2) gives [B,64,48,48,48]
+        +att2: AttentionGate3D on enc2 [B,64,48,48,48]
+        +dec2: Conv3d(128to64  k3) x2 InstanceNorm ReLU concat channels=128
+        +up1: ConvTranspose3d(64to32   k=2 stride=2) gives [B,32,96,96,96]
+        +att1: AttentionGate3D on enc1 [B,32,96,96,96]
+        +dec1: Conv3d(64to32   k3) x2 InstanceNorm ReLU concat channels=64
+        +output_head: Conv3d(32 to output_ch kernel=1) full-res logit map
+        +tumor loss: 0.5 x DiceLoss + 0.5 x FocalLoss(gamma=2 alpha=0.25)
+        +stroke loss: 0.5 x DiceLoss + 0.5 x FocalLoss(gamma=2 alpha=0.5)
+        +NO Alzheimer decoder: ADNI dataset has no voxel-level annotations
     }
 
-    class InferencePipeline {
-        +automatic_disease_detection()
-        +Tumor/Stroke via PresenceHeads
-        +Alzheimer via AlzheimerEncoder
-        +MC-Dropout uncertainty per disease
-        +perform_segmentation()
+    class TrainingConfig {
+        +optimizer: AdamW lr=2e-4 weight_decay=1e-5
+        +scheduler: CosineAnnealingLR T_max=20 eta_min=1e-6
+        +total_epochs=25 batch_size=1 ROI=96x96x96 workers=2
+        +Phase_A epochs 1-5:   lambda_cls=3.0
+        +Phase_B epochs 6-15:  lambda_cls=2.0
+        +Phase_C epochs 16-25: lambda_cls=1.5
+        +lambda_tumor=1.0 lambda_stroke=1.0
+        +Alzheimer BCEWithLogitsLoss pos_weight=N_neg_div_N_pos
+        +grad_clip: clip_grad_norm max_norm=1.0
+        +AMP: autocast + GradScaler enabled
+        +seed=42 deterministic=True
+        +training_order: 1_batch_Tumor then 1_Stroke then 1_Alzheimer round-robin
     }
 
     class CheckpointFile {
-        +ferrari_model.pth
-        +model_state state_dict
-        +metrics metrics_history dict
-        +11 metrics x N epochs
+        +filename: ferrari_model.pth
+        +key model_state: full OrderedDict state_dict
+        +key metrics: dict with 11 lists one value per epoch
+        +tumor metrics: tumor_et tumor_ncr tumor_ed tumor_mean
+        +stroke metrics: stroke_dice
+        +alzheimer metrics: alz_auc alz_accuracy alz_precision
+        +alzheimer metrics: alz_recall alz_f1
+        +load: torch.load map_location=DEVICE
+        +assert: hasattr(model alz_encoder) must be True
     }
 
-    class TrainingPerformanceDashboard {
-        +Final ET Dice metric card
-        +Final Stroke Dice metric card
-        +Final Alz AUC metric card
-        +Final Alz F1 metric card
-        +Accuracy Precision Recall cards
-        +Tumor Dice chart per epoch
-        +Stroke Dice chart per epoch
-        +Alzheimer AUC+F1 chart per epoch
-    }
-
-    StreamlitApp --> LoadModel : startup
-    LoadModel --> CheckpointFile : reads
-    CheckpointFile --> TrainingPerformanceDashboard : provides metrics
-    StreamlitApp --> InferencePipeline : on scan upload
-    InferencePipeline --> SharedEncoder : encoder features
-    SharedEncoder *-- TransformerBottleneck3D : bottleneck
-    InferencePipeline --> PresenceHeads : tumor + stroke
-    InferencePipeline --> AlzheimerEncoder : alzheimer only
-    InferencePipeline --> SegmentationDecoders : if detected
-    StreamlitApp --> TrainingPerformanceDashboard : Analysis page
+    NeuroXMultiDisease *-- SharedEncoder
+    NeuroXMultiDisease *-- PresenceHeads
+    NeuroXMultiDisease *-- AlzheimerEncoder
+    NeuroXMultiDisease *-- SegmentationDecoders
+    SharedEncoder *-- TransformerBottleneck3D
+    SegmentationDecoders *-- AttentionGate3D
+    NeuroXMultiDisease ..> TrainingConfig : trained with
+    NeuroXMultiDisease ..> CheckpointFile : saved to and loaded from
 ```
+```
+
 
 ### 🔄 Application Workflow
 
-The following flowchart illustrates the complete pipeline from MRI upload to report generation, including the **Ferrari routing** where Alzheimer detection uses the **independent AlzheimerEncoder** that receives raw MRI — completely separate from the SharedEncoder used for Tumor/Stroke.
+The complete end-to-end pipeline from MRI upload to final report. Note the **dual-path Ferrari routing** — `SharedEncoder` handles Tumor/Stroke while the independent `AlzheimerEncoder` processes raw MRI directly in a parallel path with zero shared computation.
 
 ```mermaid
 flowchart TD
-    Start([🚀 Start Application]) --> Upload{📂 Upload NIfTI}
-    Upload -->|Valid File| Preprocess[⚙️ Preprocessing]
+    Start([Start Application]) --> Upload{Upload NIfTI File}
+    Upload -->|Valid NIfTI| Preprocess[Preprocessing Pipeline]
 
-    subgraph Preprocessing_Stage ["Image Processing"]
-        Preprocess --> Normalize[Z-Score Normalization]
-        Normalize --> ROI["Extract 96³ ROI Tensor"]
-        Normalize --> Affine["Extract Affine Matrix & Spacing"]
+    subgraph Preprocessing_Stage ["Preprocessing: Unified 96-cube Pipeline"]
+        Preprocess --> ZScore["Z-Score Normalize\nmean=0 std=1 clipped at +-5sigma"]
+        ZScore --> PadCube["Pad to Cube\ncentered zero-padding to largest dim"]
+        PadCube --> ResampleROI["Trilinear Resample to 96x96x96\noutput tensor [B, 1, 96, 96, 96]"]
+        Preprocess --> ExtractAffine["Extract Affine Matrix\nand Voxel Spacing mm"]
     end
 
-    ROI --> LoadModel["🔑 load_model()\nDetect checkpoint format"]
+    ResampleROI --> LoadModel["load_model: ferrari_model.pth\nDetect checkpoint format"]
 
-    subgraph Checkpoint_Load ["Checkpoint Loading (ferrari_model.pth)"]
-        LoadModel -->|New format| ExtractState["Extract model_state"]
-        LoadModel -->|New format| ExtractMetrics["Extract metrics_history"]
-        LoadModel -->|Legacy format| LegacyLoad["Plain state_dict (no metrics)"]
+    subgraph Checkpoint_Load ["Checkpoint Loading"]
+        LoadModel -->|New format dict| ExtractState["Extract model_state\nOrderedDict weights"]
+        LoadModel -->|New format dict| ExtractMetrics["Extract metrics_history\n11 metrics x N epochs"]
+        LoadModel -->|Legacy plain state_dict| LegacyLoad["Load plain state_dict\nno metrics graceful fallback"]
     end
 
-    ExtractState --> ModelReady["NeuroXMultiDisease loaded"]
-    LegacyLoad --> ModelReady
+    ExtractState --> Validate["Validate checkpoint\nassert hasattr alz_encoder\nload_state_dict strict=False"]
+    LegacyLoad --> Validate
+    Validate --> ModelReady["NeuroXMultiDisease.eval() on DEVICE\nall 3 paths ready"]
 
-    ModelReady --> Inference["🧠 automatic_disease_detection()"]
+    ModelReady --> DetFn["automatic_disease_detection\nthreshold=0.5 use_uncertainty=True"]
 
-    subgraph AI_Engine ["NeuroX Ferrari Multi-Disease Model"]
-        Inference --> Encoder["SharedEncoder\nenc1→enc2→enc3→bottleneck"]
+    subgraph AI_Engine ["NeuroX Ferrari: Dual-Path Inference"]
 
-        Encoder -->|bottleneck features| TumorHead["Tumor PresenceHead\nBottleneck → Pool → FC"]
-        Encoder -->|bottleneck features| StrokeHead["Stroke PresenceHead\nBottleneck → Pool → FC"]
+        subgraph SharedPath ["Path A: SharedEncoder for Tumor and Stroke"]
+            DetFn --> EncFwd["SharedEncoder forward pass\nInput [B,1,96,96,96]"]
+            EncFwd --> Enc1["enc1 block: Conv(1to32)x2 + InstanceNorm + ReLU\noutput [B,32,96,96,96] + MaxPool [B,32,48,48,48]"]
+            Enc1 --> Enc2["enc2 block: Conv(32to64)x2 + InstanceNorm + ReLU\noutput [B,64,48,48,48] + MaxPool [B,64,24,24,24]"]
+            Enc2 --> Enc3["enc3 block: Conv(64to128)x2 + InstanceNorm + ReLU\noutput [B,128,24,24,24] + MaxPool [B,128,12,12,12]"]
+            Enc3 --> TfmBottle["TransformerBottleneck3D\nflatten to 1728 tokens dim=128\n4x LayerNorm+MHA(8heads)+FFN(256)\noutput [B,128,12,12,12]"]
+            TfmBottle -->|bottleneck| TumorHead["Tumor PresenceHead\nAvgPool then Linear(128to64to1)\nDropout=0.3 MC-Dropout x10\noutput: prob_tumor and std_tumor"]
+            TfmBottle -->|bottleneck| StrokeHead["Stroke PresenceHead\nAvgPool then Linear(128to64to1)\nDropout=0.3 MC-Dropout x10\noutput: prob_stroke and std_stroke"]
+        end
 
-        RawMRI["📥 Raw MRI Input"] -->|independent path| AlzBranch["🧬 AlzheimerEncoder\nRaw MRI → 3×Conv3D → DualPool → MLP\n⚡ Fully Independent — zero shared features"]
+        subgraph AlzPath ["Path B: AlzheimerEncoder â€” Zero Shared Params"]
+            RawMRI["Raw MRI [B,1,96,96,96]\nfrom Preprocessing"] -->|completely independent| AlzBlock1["block1: Conv(1to32)x2 + InstanceNorm\n+ MaxPool output [B,32,48,48,48]"]
+            AlzBlock1 --> AlzBlock2["block2: Conv(32to64)x2 + InstanceNorm\n+ MaxPool output [B,64,24,24,24]"]
+            AlzBlock2 --> AlzBlock3["block3: Conv(64to128)x2 + InstanceNorm\nNO MaxPool output [B,128,24,24,24]"]
+            AlzBlock3 --> DualPool["DualPool: AvgPool3d(1) + MaxPool3d(1)\nconcat gives [B,256]\nAvgPool=global atrophy MaxPool=focal peaks"]
+            DualPool --> AlzMLP["LayerNorm(256)\nLinear(256to128) then GELU then Dropout(0.4) then Linear(128to1)\nMC-Dropout x10 gives prob_alz and std_alz"]
+        end
 
-        TumorHead -->|logit| TumorSeg["Tumor Seg Decoder\n3-class output"]
-        StrokeHead -->|logit| StrokeSeg["Stroke Seg Decoder\n1-class output"]
     end
 
     Preprocessing_Stage --> RawMRI
 
-    TumorHead --> ProbT{Tumor Detected?}
-    StrokeHead --> ProbS{Stroke Detected?}
-    AlzBranch --> ProbA{"Alzheimer Detected?"}
+    TumorHead --> ProbT{"prob_tumor >= 0.5?"}
+    StrokeHead --> ProbS{"prob_stroke >= 0.5?"}
+    AlzMLP --> ProbA{"prob_alz >= 0.5?"}
 
-    subgraph Post_Processing ["Analysis & Refinement"]
-        ProbT -->|Yes| Mask1[Generate Tumor Mask]
-        ProbS -->|Yes| Mask2[Generate Stroke Mask]
-        ProbA -->|Yes| NoSeg["No Segmentation\nPresence-only disease"]
-
-        Mask1 --> Clean1[Morphological Cleaning]
-        Mask2 --> Clean2[Morphological Cleaning]
-
-        Clean1 --> Map1[Map to Patient Space]
-        Clean2 --> Map2[Map to Patient Space]
+    subgraph Post_Processing ["Post-Processing and Segmentation"]
+        ProbT -->|Yes| TumSeg["Run Tumor SegDecoder\nup3 ConvTranspose+att3(enc3) dec3 Conv(256to128)\nup2 ConvTranspose+att2(enc2) dec2 Conv(128to64)\nup1 ConvTranspose+att1(enc1) dec1 Conv(64to32)\noutput_head Conv(32to3) gives ET NCR ED logits\nargmax then morphological cleaning"]
+        ProbS -->|Yes| StrSeg["Run Stroke SegDecoder\nSame U-Net path as Tumor\noutput_head Conv(32to1) gives binary mask\nsigmoid then threshold then morphological cleaning"]
+        ProbA -->|Yes| AlzNoSeg["Alzheimer: NO segmentation\nADNI has no voxel annotations\nShow prob_alz and std_alz only"]
+        ProbT -->|No| SkipT[No tumor mask]
+        ProbS -->|No| SkipS[No stroke mask]
+        ProbA -->|No| SkipA[No Alzheimer finding]
+        TumSeg --> MapT["Map tumor mask to patient space\ninverse resize + inverse pad\nalign to original affine matrix"]
+        StrSeg --> MapS["Map stroke mask to patient space\ninverse resize + inverse pad\nalign to original affine matrix"]
     end
 
-    Preprocess --> SkullStrip{HD-BET Available?}
-    SkullStrip -->|Yes| HDBET[Medical-Grade Brain Extraction]
-    SkullStrip -->|No| Fail[3D Visualization Disabled]
+    Preprocess --> SkullStrip{"HD-BET installed?"}
+    SkullStrip -->|Yes| HDBET["HD-BET brain extraction\nmedical-grade skull stripping\nCLI subprocess call"]
+    SkullStrip -->|No| NoHDBET["3D surface disabled\nsafe fallback mode"]
+    HDBET --> BrainSurf["Marching cubes on brain mask\ntrimesh surface mesh generation"]
 
-    HDBET --> BrainSurf[Generate Brain Surface Mesh]
-
-    Map1 --> VizScene[Assemble 3D Scene]
-    Map2 --> VizScene
-    NoSeg --> VizScene
+    MapT --> VizScene["Assemble 3D Visualization Scene\nlesion meshes + brain surface"]
+    MapS --> VizScene
+    AlzNoSeg --> VizScene
+    SkipT --> VizScene
+    SkipS --> VizScene
+    SkipA --> VizScene
     BrainSurf --> VizScene
+    NoHDBET -.-> VizScene
 
-    VizScene --> Dashboard["📊 Analysis Dashboard"]
-    Fail -.-> Dashboard
+    VizScene --> Dashboard["Analysis Dashboard"]
 
-    subgraph Analysis_Page ["Analysis Page Sections"]
-        Dashboard --> DetResults["🎯 Detection Results\nProbability cards per disease"]
-        Dashboard --> ClinMetrics["📊 Clinical Metrics\nMC-Dropout uncertainty & CI"]
-        Dashboard --> TrainDash["📈 Training Performance Dashboard\nMetric cards + Epoch charts"]
-        ExtractMetrics -.->|if available| TrainDash
+    subgraph Analysis_Page ["Analysis Page"]
+        Dashboard --> DetCard["Detection Result Cards\nprob per disease + MC uncertainty std\nconfidence interval shown"]
+        Dashboard --> SegViz["Segmentation Visualization\n3D scene with lesion overlays\nslice-by-slice axial view"]
+        Dashboard --> ClinMetrics["Clinical Metrics\nlesion volume mm3 and percent brain\nBraTS class breakdown for tumor"]
+        Dashboard --> TrainDash["Training Performance Dashboard\nfinal metric cards: ET-Dice Stroke-Dice Alz-AUC Alz-F1\nepoch line charts for all 11 metrics"]
+        ExtractMetrics -.->|if checkpoint has metrics| TrainDash
     end
 
-    Dashboard --> ReportGen{📄 Generate Report}
-    ReportGen -->|Groq AI| AI_Text[AI Clinical Summary]
-    ReportGen -->|ReportLab| PDF[Export PDF Report]
-    AI_Text --> End([✅ End Session])
+    Dashboard --> ReportGen{Generate Report?}
+    ReportGen -->|Groq LLM| AIText["AI Clinical Summary\nGroq API call with disease findings\nnatural language report generation"]
+    ReportGen -->|ReportLab| PDF["Export PDF Report\nall metrics + visualizations embedded"]
+    AIText --> End([Session Complete])
     PDF --> End
+```
 ```
 
 ---
