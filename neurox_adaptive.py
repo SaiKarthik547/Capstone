@@ -76,7 +76,7 @@ ROI_SIZE = (96, 96, 96)
 PRESENCE_THRESHOLD = 0.5
 # Dynamic Path Configuration
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "neurox_multihead_final.pth"
+MODEL_PATH = BASE_DIR / "checkpoints" / "neurox_model.pth"
 ASSET_DIR = BASE_DIR / "assets" / "brain"
 
 # Disease Configuration

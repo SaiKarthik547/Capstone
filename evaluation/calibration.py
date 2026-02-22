@@ -219,7 +219,7 @@ def report_calibration_metrics(
     """
     # Brier score
     brier_before = brier_score_loss(y_true, y_prob_before)
-    brier_after = brier_score_loss(y_prob_after)
+    brier_after = brier_score_loss(y_true, y_prob_after)
     brier_improvement = brier_before - brier_after
     
     # ECE
