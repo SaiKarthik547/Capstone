@@ -273,21 +273,35 @@ RESULTS: 8/8 tests passed
 classDiagram
     direction TB
 
-    class NeuroXMultiDisease {
-        +encoder : SharedEncoder
-        +presence_heads : ModuleDict[tumor, stroke]
-        +seg_decoders : ModuleDict[tumor, stroke]
-        +alz_encoder : AlzheimerEncoder
-        +forward(x, active_presence, active_seg) dict
+    %% ── Primitive Building Blocks ──────────────────────────────────────────
+
+    class ResBlock3D {
+        +in_ch : int
+        +out_ch : int
+        +conv : Sequential[Conv3d, InstanceNorm3d, ReLU, Conv3d, InstanceNorm3d]
+        +skip : Conv3d or Identity
+        +relu : ReLU
+        +forward(x Tensor) Tensor
     }
 
-    class SharedEncoder {
-        +in_channels : int = 1
-        +enc1 : ConvBlock(1→32)
-        +enc2 : ConvBlock(32→64)
-        +enc3 : ConvBlock(64→128)
-        +bottleneck : TransformerBottleneck3D
-        +forward(x) dict[enc1, enc2, enc3, bottleneck]
+    class SEBlock {
+        +channels : int
+        +reduction : int = 16
+        +pool : AdaptiveAvgPool3d(1)
+        +fc : Sequential[Linear, ReLU, Linear, Sigmoid]
+        +forward(x Tensor) Tensor
+    }
+
+    class AttentionGate3D {
+        +gate_ch : int
+        +skip_ch : int
+        +inter_ch : int
+        +W_gate : Conv3d(gate_ch, inter_ch, 1)
+        +W_skip : Conv3d(skip_ch, inter_ch, 1)
+        +psi : Conv3d(inter_ch, 1, 1)
+        +relu : ReLU
+        +sigmoid : Sigmoid
+        +forward(gate Tensor, skip Tensor) Tensor
     }
 
     class TransformerBottleneck3D {
@@ -296,81 +310,96 @@ classDiagram
         +heads : int = 8
         +mlp_dim : int = 256
         +dropout : float = 0.2
-        +tokens : int = 1728 (12x12x12)
-        +4x PreNorm + MultiHeadAttention(8 heads)
-        +4x PreNorm + FeedForward(128→256→128)
-        +output [B, 128, 12, 12, 12]
+        +layers : ModuleList[depth x LayerNorm, MHA, LayerNorm, FFN]
+        +forward(x Tensor) Tensor
     }
+
+    %% ── Encoder ────────────────────────────────────────────────────────────
+
+    class SharedEncoder {
+        +in_channels : int = 1
+        +enc1 : Sequential[Conv3d 1to32, IN, ReLU, Conv3d, IN, ReLU]
+        +pool1 : MaxPool3d(2)
+        +enc2 : Sequential[Conv3d 32to64, IN, ReLU, Conv3d, IN, ReLU]
+        +pool2 : MaxPool3d(2)
+        +enc3 : Sequential[Conv3d 64to128, IN, ReLU, Conv3d, IN, ReLU]
+        +pool3 : MaxPool3d(2)
+        +bottleneck : TransformerBottleneck3D
+        +forward(x Tensor) Dict[enc1,enc2,enc3,bottleneck]
+    }
+
+    %% ── Task Heads ─────────────────────────────────────────────────────────
 
     class PresenceHead {
         +in_features : int = 128
         +pool : AdaptiveAvgPool3d(1)
+        +flatten : Flatten
         +fc1 : Linear(128, 64)
         +relu : ReLU
         +dropout : Dropout(p=0.2)
         +fc2 : Linear(64, 1)
-        +MC-Dropout: 10 stochastic passes at inference
-    }
-
-    class AlzheimerEncoder {
-        +FULLY INDEPENDENT: zero shared params
-        +block1 : ResBlock3D(1→32) + MaxPool
-        +block2 : ResBlock3D(32→64) + MaxPool
-        +block3 : ResBlock3D(64→128) + MaxPool
-        +block4 : ResBlock3D(128→256) + SEBlock(256)
-        +avg_pool : AdaptiveAvgPool3d(1)
-        +max_pool : AdaptiveMaxPool3d(1)
-        +norm : LayerNorm(512)
-        +classifier : Linear(512→256)→GELU→Linear(256→128)→GELU→Dropout(0.2)→Linear(128→1)
-        +forward(x) logit [B, 1]
+        +forward(bottleneck_features Tensor) Tensor
     }
 
     class SegmentationDecoder {
-        +output_channels : int (3 for tumor, 1 for stroke)
-        +up3+att3+dec3: ConvTranspose(128→128)+AttGate+Conv(256→128)
-        +up2+att2+dec2: ConvTranspose(128→64)+AttGate+Conv(128→64)
-        +up1+att1+dec1: ConvTranspose(64→32)+AttGate+Conv(64→32)
+        +name : str
+        +output_channels : int
+        +up3 : ConvTranspose3d(128, 128, 2, stride=2)
+        +att3 : AttentionGate3D(128, 128, 64)
+        +dec3 : ConvBlock(256 to 128)
+        +up2 : ConvTranspose3d(128, 64, 2, stride=2)
+        +att2 : AttentionGate3D(64, 64, 32)
+        +dec2 : ConvBlock(128 to 64)
+        +up1 : ConvTranspose3d(64, 32, 2, stride=2)
+        +att1 : AttentionGate3D(32, 32, 16)
+        +dec1 : ConvBlock(64 to 32)
         +output_head : Conv3d(32, C, 1)
-        +aux_head : Conv3d(128, C, 1) deep supervision
-        +loss: 0.8×Dice + 0.2×BCE (Focal for stroke)
+        +aux_head : Conv3d(128, C, 1)
+        +forward(enc_features Dict) Dict[main,aux]
     }
 
-    class TrainingConfig {
-        +optimizer_shared: AdamW(lr=2e-4, wd=1e-4)
-        +optimizer_alz: AdamW(lr=1e-4, wd=5e-5)
-        +scheduler: CosineAnnealingLR(T_max=5) at epoch 26
-        +EPOCHS=60, BATCH_SIZE=1, ROI=96x96x96
-        +Phase1 ep1-15:  ALZ only, LAMBDA_CLS=2.0
-        +Phase2 ep16-30: SEG only, LAMBDA_CLS=2.0
-        +Phase3 ep31-60: JOINT, LR reduced (2e-5 shared, 5e-5 alz)
-        +LAMBDA_TUMOR=1.5, LAMBDA_STROKE=1.5, LAMBDA_CLS=2.0
-        +grad_clip: max_norm=1.0
-        +AMP: autocast + GradScaler, seed=42
+    class AlzheimerEncoder {
+        +block1 : ResBlock3D(1, 32)
+        +pool1 : MaxPool3d(2)
+        +block2 : ResBlock3D(32, 64)
+        +pool2 : MaxPool3d(2)
+        +block3 : ResBlock3D(64, 128)
+        +pool3 : MaxPool3d(2)
+        +block4 : ResBlock3D(128, 256)
+        +se : SEBlock(256)
+        +avg_pool : AdaptiveAvgPool3d(1)
+        +max_pool : AdaptiveMaxPool3d(1)
+        +norm : LayerNorm(512)
+        +classifier : Sequential[Linear(512,256), GELU, Linear(256,128), GELU, Dropout(0.2), Linear(128,1)]
+        +forward(x Tensor) Tensor
     }
 
-    class CheckpointFile {
-        +file: neurox_model.pth
-        +key[model_state]: OrderedDict weights (strict=True on load)
-        +key[metrics][epoch]: list len=60
-        +key[metrics][tumor_et]: list len=60
-        +key[metrics][tumor_ncr]: list len=60
-        +key[metrics][tumor_ed]: list len=60
-        +key[metrics][tumor_mean]: list len=60
-        +key[metrics][stroke_dice]: list len=60
-        +key[metrics][alz_auc]: list len=60
-        +key[metrics][alz_accuracy]: list len=60
-        +key[metrics][alz_precision]: list len=60
-        +key[metrics][alz_recall]: list len=60
-        +key[metrics][alz_f1]: list len=60
+    %% ── Top-Level Model ────────────────────────────────────────────────────
+
+    class NeuroXMultiDisease {
+        +encoder : SharedEncoder
+        +presence_heads : ModuleDict[tumor:PresenceHead, stroke:PresenceHead]
+        +seg_decoders : ModuleDict[tumor:SegmentationDecoder, stroke:SegmentationDecoder]
+        +alz_encoder : AlzheimerEncoder
+        +forward(x Tensor, active_presence List, active_seg List) Dict
     }
 
-    NeuroXMultiDisease *-- SharedEncoder
-    NeuroXMultiDisease *-- PresenceHead
-    NeuroXMultiDisease *-- AlzheimerEncoder
-    NeuroXMultiDisease *-- SegmentationDecoder
-    SharedEncoder *-- TransformerBottleneck3D
-    NeuroXMultiDisease ..> TrainingConfig : trained with
-    NeuroXMultiDisease ..> CheckpointFile : saved to / loaded from
+    %% ── Relationships ──────────────────────────────────────────────────────
+
+    NeuroXMultiDisease *-- SharedEncoder            : encoder
+    NeuroXMultiDisease *-- "2" PresenceHead         : presence_heads
+    NeuroXMultiDisease *-- "2" SegmentationDecoder  : seg_decoders
+    NeuroXMultiDisease *-- AlzheimerEncoder         : alz_encoder
+
+    SharedEncoder *-- TransformerBottleneck3D       : bottleneck
+    SharedEncoder ..> ResBlock3D                    : uses conv blocks
+
+    SegmentationDecoder *-- "3" AttentionGate3D     : att1, att2, att3
+
+    AlzheimerEncoder *-- "4" ResBlock3D             : block1-block4
+    AlzheimerEncoder *-- SEBlock                    : se
+
+    TransformerBottleneck3D ..> TransformerBottleneck3D : depth=4 stacked layers
 ```
 
 ---
