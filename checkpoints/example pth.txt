@@ -1,0 +1,1 @@
+your original model.ph file comes here in this folder by training the training file in kaggle and output model.pth and checkpoints.pth files comes here in this folder
