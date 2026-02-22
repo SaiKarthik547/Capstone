@@ -251,11 +251,6 @@ RESULTS: 8/8 tests passed
   ✅  Power analysis
 ```
 
-> [!NOTE]
-> During testing, a bug was found and fixed in `evaluation/calibration.py` line 222:
-> `brier_score_loss(y_prob_after)` was missing the required `y_true` argument.
-> Fixed to: `brier_score_loss(y_true, y_prob_after)`.
-
 ### Evaluation Modules
 - **`evaluation/nested_cv.py`** - Multi-label BCE verification, nested cross-validation (5×3), patient-level bootstrap CI
 - **`evaluation/calibration.py`** - Temperature scaling (Guo et al. 2017), ECE, reliability diagrams, ROC operating points
