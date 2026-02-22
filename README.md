@@ -215,24 +215,53 @@ The web interface will open automatically at `http://localhost:8501`.
 The project includes a comprehensive evaluation framework for publication-grade validation:
 
 ### Running Tests
+
+Run the full integration test suite using synthetic data (no trained model needed):
+
 ```bash
-python run_evaluation_test.py
+py evaluation/run_evaluation_test.py
 ```
 
-**Expected output:**
+### ✅ Test Results — February 22, 2026
+
+All 8 tests pass on synthetic data (`N=200`, `seed=42`, 3-disease labels, random logits).
+
+| # | Test | Module | Result | Key Metric |
+|---|------|--------|--------|-----------|
+| 1 | Multi-label BCE verification | `nested_cv.py` | ✅ PASS | 75/200 multi-label samples (37.5%) |
+| 2 | Temperature scaling | `calibration.py` | ✅ PASS | Tumor=1.784 · Stroke=1.803 · Alz=1.799 |
+| 3 | ECE + calibration metrics | `calibration.py` | ✅ PASS | Tumor ECE=0.1585, Brier=0.2937 |
+| 4 | ROC operating points | `calibration.py` | ✅ PASS | Sens@95%Spec and Spec@95%Sens computed for all 3 diseases |
+| 5 | Lesion-level IoU matching | `statistical_rigor.py` | ✅ PASS | TP=1, FP=0, FN=0 on synthetic lesion pair |
+| 6 | Sensitivity vs lesion size | `statistical_rigor.py` | ✅ PASS | 8 size bins (mm³), 100% sensitivity at simulated sizes |
+| 7 | Decision curve analysis | `statistical_rigor.py` | ✅ PASS | Tumor NB=0.384 · Stroke NB=0.429 · Alz NB=0.424 |
+| 8 | Power analysis (Hanley & McNeil) | `statistical_rigor.py` | ✅ PASS | N=100 required for ΔAUC=0.15 (prev=40%) |
+
 ```
-✅ TEST 1 PASSED: Comprehensive metrics
-✅ TEST 2 PASSED: Temperature scaling  
-✅ TEST 3 PASSED: ROC operating points
-✅ TEST 4 PASSED: Decision curve analysis
-✅ TEST 5 PASSED: Power analysis
+============================================================
+RESULTS: 8/8 tests passed
+============================================================
+  ✅  Multi-label BCE verification
+  ✅  Temperature scaling
+  ✅  ECE + calibration metrics
+  ✅  ROC operating points
+  ✅  Lesion-level IoU matching
+  ✅  Sensitivity vs lesion size
+  ✅  Decision curve analysis
+  ✅  Power analysis
 ```
+
+> [!NOTE]
+> During testing, a bug was found and fixed in `evaluation/calibration.py` line 222:
+> `brier_score_loss(y_prob_after)` was missing the required `y_true` argument.
+> Fixed to: `brier_score_loss(y_true, y_prob_after)`.
 
 ### Evaluation Modules
-- **`evaluation/nested_cv.py`** - Nested cross-validation, multi-label stratification
-- **`evaluation/calibration.py`** - Temperature scaling, calibration metrics
-- **`evaluation/statistical_rigor.py`** - IoU matching, decision curves, power analysis
-- **`evaluation/run_evaluation.py`** - Main evaluation orchestrator
+- **`evaluation/nested_cv.py`** - Multi-label BCE verification, nested cross-validation (5×3), patient-level bootstrap CI
+- **`evaluation/calibration.py`** - Temperature scaling (Guo et al. 2017), ECE, reliability diagrams, ROC operating points
+- **`evaluation/statistical_rigor.py`** - Lesion-level IoU matching, sensitivity vs lesion size, decision curves, power analysis
+- **`evaluation/run_evaluation.py`** - Main evaluation orchestrator (requires trained model + real dataset)
+- **`evaluation/run_evaluation_test.py`** - Synthetic integration test (8 tests, no model required)
 
 ---
 
