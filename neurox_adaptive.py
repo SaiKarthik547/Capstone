@@ -2473,7 +2473,7 @@ def run_streamlit_app():
         uploaded_file = st.file_uploader(
             "Drag and drop your MRI scan here",
             type=["nii", "gz"],
-            help="Supported formats: .nii, .nii.gz"
+            help="Supported formats: .nii.gz"
         )
         
         if uploaded_file:
