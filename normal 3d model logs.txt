@@ -1,0 +1,934 @@
+Time
+#
+Log Message
+6.6s	0	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+6.6s	1	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+6.6s	2	0.00s - to python to disable frozen modules.
+6.6s	3	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+7.2s	4	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+7.2s	5	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+7.2s	6	0.00s - to python to disable frozen modules.
+7.2s	7	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+9.3s	8	Found existing installation: protobuf 5.29.5
+9.3s	9	Uninstalling protobuf-5.29.5:
+9.3s	10	  Successfully uninstalled protobuf-5.29.5
+9.8s	11	Found existing installation: tensorboard 2.19.0
+9.8s	12	Uninstalling tensorboard-2.19.0:
+10.0s	13	  Successfully uninstalled tensorboard-2.19.0
+10.6s	14	[33mWARNING: Skipping tb-nightly as it is not installed.[0m[33m
+13.9s	15	[0m[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/2.7 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━[0m[90m╺[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.3/2.7 MB[0m [31m9.9 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m2.7/2.7 MB[0m [31m39.4 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m2.7/2.7 MB[0m [31m30.2 MB/s[0m eta [36m0:00:00[0m
+14.0s	16	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/740.3 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m740.3/740.3 kB[0m [31m30.5 MB/s[0m eta [36m0:00:00[0m
+14.0s	17	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/2.0 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m2.0/2.0 MB[0m [31m91.4 MB/s[0m eta [36m0:00:00[0m
+14.0s	18	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/138.3 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m138.3/138.3 kB[0m [31m13.1 MB/s[0m eta [36m0:00:00[0m
+14.1s	19	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/9.1 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m[90m━━━━━[0m [32m8.0/9.1 MB[0m [31m239.7 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m9.1/9.1 MB[0m [31m228.8 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m9.1/9.1 MB[0m [31m115.8 MB/s[0m eta [36m0:00:00[0m
+14.2s	20	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/323.5 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m323.5/323.5 kB[0m [31m27.5 MB/s[0m eta [36m0:00:00[0m
+14.3s	21	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/6.9 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━[0m[91m╸[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m1.8/6.9 MB[0m [31m194.0 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m6.9/6.9 MB[0m [31m120.4 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m6.9/6.9 MB[0m [31m78.4 MB/s[0m eta [36m0:00:00[0m
+20.6s	22	[?25h[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+20.6s	23	google-adk 1.22.1 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+20.6s	24	bigframes 2.26.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+20.6s	25	tensorflow 2.19.0 requires tensorboard~=2.19.0, which is not installed.
+20.6s	26	google-cloud-translate 3.12.1 requires protobuf!=3.20.0,!=3.20.1,!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<5.0.0dev,>=3.19.5, but you have protobuf 6.33.5 which is incompatible.
+20.6s	27	google-ai-generativelanguage 0.6.15 requires protobuf!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<6.0.0dev,>=3.20.2, but you have protobuf 6.33.5 which is incompatible.
+20.6s	28	bigframes 2.26.0 requires rich<14,>=12.4.4, but you have rich 14.2.0 which is incompatible.
+20.6s	29	tensorflow 2.19.0 requires protobuf!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<6.0.0dev,>=3.20.3, but you have protobuf 6.33.5 which is incompatible.
+20.6s	30	grpcio-status 1.71.2 requires protobuf<6.0dev,>=5.26.1, but you have protobuf 6.33.5 which is incompatible.
+20.6s	31	gcsfs 2025.3.0 requires fsspec==2025.3.0, but you have fsspec 2025.10.0 which is incompatible.[0m[31m
+22.3s	32	[0mCollecting protobuf==3.20.3
+22.3s	33	  Downloading protobuf-3.20.3-py2.py3-none-any.whl.metadata (720 bytes)
+22.4s	34	Collecting tensorboard==2.16.2
+22.4s	35	  Downloading tensorboard-2.16.2-py3-none-any.whl.metadata (1.6 kB)
+22.4s	36	Requirement already satisfied: absl-py>=0.4 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.4.0)
+22.4s	37	Requirement already satisfied: grpcio>=1.48.2 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.75.1)
+22.4s	38	Requirement already satisfied: markdown>=2.6.8 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (3.9)
+22.4s	39	Requirement already satisfied: numpy>=1.12.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (2.0.2)
+22.5s	40	Requirement already satisfied: setuptools>=41.0.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (75.2.0)
+22.5s	41	Requirement already satisfied: six>1.9 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.17.0)
+22.5s	42	Requirement already satisfied: tensorboard-data-server<0.8.0,>=0.7.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (0.7.2)
+22.5s	43	Requirement already satisfied: werkzeug>=1.0.1 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (3.1.3)
+22.5s	44	Requirement already satisfied: typing-extensions~=4.12 in /usr/local/lib/python3.12/dist-packages (from grpcio>=1.48.2->tensorboard==2.16.2) (4.15.0)
+22.5s	45	Requirement already satisfied: MarkupSafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from werkzeug>=1.0.1->tensorboard==2.16.2) (3.0.3)
+22.5s	46	Downloading protobuf-3.20.3-py2.py3-none-any.whl (162 kB)
+22.5s	47	[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/162.1 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m162.1/162.1 kB[0m [31m4.8 MB/s[0m eta [36m0:00:00[0m
+22.5s	48	[?25hDownloading tensorboard-2.16.2-py3-none-any.whl (5.5 MB)
+22.6s	49	[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/5.5 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━[0m[90m╺[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m1.4/5.5 MB[0m [31m46.6 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m5.5/5.5 MB[0m [31m96.1 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m5.5/5.5 MB[0m [31m66.1 MB/s[0m eta [36m0:00:00[0m
+24.7s	50	[?25hInstalling collected packages: protobuf, tensorboard
+24.7s	51	  Attempting uninstall: protobuf
+24.7s	52	    Found existing installation: protobuf 6.33.5
+24.7s	53	    Uninstalling protobuf-6.33.5:
+24.7s	54	      Successfully uninstalled protobuf-6.33.5
+25.2s	55	[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+25.2s	56	google-adk 1.22.1 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+25.2s	57	bigframes 2.26.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+25.2s	58	a2a-sdk 0.3.22 requires protobuf>=5.29.5, but you have protobuf 3.20.3 which is incompatible.
+25.2s	59	onnx 1.20.1 requires protobuf>=4.25.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	60	opentelemetry-proto 1.37.0 requires protobuf<7.0,>=5.0, but you have protobuf 3.20.3 which is incompatible.
+25.2s	61	tensorflow-metadata 1.17.2 requires protobuf>=4.25.2; python_version >= "3.11", but you have protobuf 3.20.3 which is incompatible.
+25.2s	62	ydf 0.13.0 requires protobuf<7.0.0,>=5.29.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	63	bigframes 2.26.0 requires rich<14,>=12.4.4, but you have rich 14.2.0 which is incompatible.
+25.2s	64	tensorflow 2.19.0 requires tensorboard~=2.19.0, but you have tensorboard 2.16.2 which is incompatible.
+25.2s	65	grpcio-status 1.71.2 requires protobuf<6.0dev,>=5.26.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	66	gcsfs 2025.3.0 requires fsspec==2025.3.0, but you have fsspec 2025.10.0 which is incompatible.[0m[31m
+25.2s	67	[0mSuccessfully installed protobuf-3.20.3 tensorboard-2.16.2
+25.4s	68	✅ Setup Complete. Protobuf Version: 3.20.3
+25.4s	69	Writing app.py
+31.8s	70	================================================================================
+31.8s	71	🔍 GLOBAL SAFETY CHECKS
+32.0s	72	CUDA Available: True
+32.0s	73	Device: Tesla T4
+32.0s	74	================================================================================
+35.6s	75	✅ Tumor Dataset: 368 cases
+42.0s	76	✅ Stroke Dataset: 250 cases
+52.3s	77	✅ Alzheimer Split:
+52.3s	78	   Train: Counter({1: 405, 0: 377})
+52.3s	79	   Val:   Counter({1: 101, 0: 95})
+57.2s	80	/kaggle/working/app.py:568: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+57.2s	81	  scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
+57.2s	82	
+57.2s	83	🔍 PRE-TRAINING BATCH CHECK 🔍
+57.9s	84	✅ Tumor Batch: Img torch.Size([1, 1, 96, 96, 96]) Range [-0.42, 7.60] | Seg torch.Size([1, 3, 96, 96, 96]) Sum 12466
+58.2s	85	✅ Stroke Batch: Img torch.Size([1, 1, 96, 96, 96]) Range [-0.43, 6.06] | Seg torch.Size([1, 1, 96, 96, 96]) Sum 639
+58.2s	86	========================================
+58.2s	87	
+58.2s	88	🚀 Starting Training (DEBUG=False, EPOCHS=15)...
+59.1s	89	
+59.1s	90	============================================================
+59.1s	91	  EPOCH 1/15 — Round-Robin Training (782 steps)
+59.1s	92	============================================================
+59.9s	93	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+59.9s	94	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+70.2s	95	   [Step 10 Stroke Debug] Pred mean: 0.4848 | GT mean: 0.0082
+105.5s	96	  Step   50/782 | Tumor L=1.102 D=0.078 | Stroke L=1.829 D=0.030 | Alz L=0.705
+154.2s	97	  Step  100/782 | Tumor L=1.076 D=0.118 | Stroke L=1.768 D=0.029 | Alz L=0.709
+204.8s	98	  Step  150/782 | Tumor L=1.052 D=0.138 | Stroke L=1.707 D=0.038 | Alz L=0.709
+255.3s	99	  Step  200/782 | Tumor L=1.031 D=0.162 | Stroke L=1.659 D=0.048 | Alz L=0.706
+305.3s	100	  Step  250/782 | Tumor L=1.013 D=0.178 | Stroke L=1.620 D=0.071 | Alz L=0.703
+333.6s	101	  Step  300/782 | Tumor L=0.997 D=0.194 | Stroke L=1.620 D=0.071 | Alz L=0.702
+361.8s	102	  Step  350/782 | Tumor L=0.984 D=0.207 | Stroke L=1.620 D=0.071 | Alz L=0.702
+380.8s	103	  Step  400/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+395.7s	104	  Step  450/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+409.7s	105	  Step  500/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+424.2s	106	  Step  550/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+439.4s	107	  Step  600/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+454.0s	108	  Step  650/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+469.7s	109	  Step  700/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+483.7s	110	  Step  750/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+493.1s	111	  Step  782/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+493.1s	112	
+493.1s	113	--- Epoch 1 Summary ---
+493.1s	114	   🧠 Tumor  | Loss: 0.9792 | ET Dice: 0.2118
+493.1s	115	   🩸 Stroke | Loss: 1.6200 | Dice:    0.0708
+493.1s	116	   🧬 Alz    | Loss: 0.6997
+546.0s	117	   🛡️ Alzheimer Val AUC: 0.5881
+546.1s	118	✅ Epoch 1 Complete.
+546.1s	119	
+546.1s	120	============================================================
+546.1s	121	  EPOCH 2/15 — Round-Robin Training (782 steps)
+546.1s	122	============================================================
+546.3s	123	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+546.3s	124	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+556.0s	125	   [Step 10 Stroke Debug] Pred mean: 0.3215 | GT mean: 0.0008
+596.4s	126	  Step   50/782 | Tumor L=0.891 D=0.258 | Stroke L=1.426 D=0.106 | Alz L=0.691
+646.6s	127	  Step  100/782 | Tumor L=0.886 D=0.298 | Stroke L=1.420 D=0.112 | Alz L=0.690
+696.4s	128	  Step  150/782 | Tumor L=0.881 D=0.324 | Stroke L=1.412 D=0.123 | Alz L=0.693
+746.4s	129	  Step  200/782 | Tumor L=0.877 D=0.327 | Stroke L=1.398 D=0.120 | Alz L=0.694
+796.5s	130	  Step  250/782 | Tumor L=0.874 D=0.334 | Stroke L=1.391 D=0.132 | Alz L=0.694
+824.3s	131	  Step  300/782 | Tumor L=0.871 D=0.341 | Stroke L=1.391 D=0.132 | Alz L=0.694
+852.3s	132	  Step  350/782 | Tumor L=0.867 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+866.0s	133	  Step  400/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+871.8s	134	  Step  450/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+877.5s	135	  Step  500/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+883.3s	136	  Step  550/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+889.0s	137	  Step  600/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.696
+894.7s	138	  Step  650/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+900.5s	139	  Step  700/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.696
+906.2s	140	  Step  750/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+909.9s	141	  Step  782/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+909.9s	142	
+909.9s	143	--- Epoch 2 Summary ---
+909.9s	144	   🧠 Tumor  | Loss: 0.8659 | ET Dice: 0.3578
+909.9s	145	   🩸 Stroke | Loss: 1.3912 | Dice:    0.1321
+909.9s	146	   🧬 Alz    | Loss: 0.6954
+962.4s	147	   🛡️ Alzheimer Val AUC: 0.4862
+962.6s	148	✅ Epoch 2 Complete.
+962.6s	149	
+962.6s	150	============================================================
+962.6s	151	  EPOCH 3/15 — Round-Robin Training (782 steps)
+962.6s	152	============================================================
+962.8s	153	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+962.8s	154	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+972.7s	155	   [Step 10 Stroke Debug] Pred mean: 0.2569 | GT mean: 0.0013
+1012.6s	156	  Step   50/782 | Tumor L=0.841 D=0.326 | Stroke L=1.326 D=0.146 | Alz L=0.692
+1062.7s	157	  Step  100/782 | Tumor L=0.836 D=0.367 | Stroke L=1.339 D=0.142 | Alz L=0.689
+1112.6s	158	  Step  150/782 | Tumor L=0.833 D=0.392 | Stroke L=1.322 D=0.157 | Alz L=0.690
+1162.3s	159	  Step  200/782 | Tumor L=0.831 D=0.386 | Stroke L=1.322 D=0.155 | Alz L=0.697
+1212.4s	160	  Step  250/782 | Tumor L=0.829 D=0.389 | Stroke L=1.314 D=0.154 | Alz L=0.696
+1240.4s	161	  Step  300/782 | Tumor L=0.827 D=0.378 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1268.4s	162	  Step  350/782 | Tumor L=0.824 D=0.388 | Stroke L=1.314 D=0.154 | Alz L=0.699
+1282.1s	163	  Step  400/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.700
+1287.9s	164	  Step  450/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.698
+1293.6s	165	  Step  500/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.695
+1299.4s	166	  Step  550/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1305.1s	167	  Step  600/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1310.9s	168	  Step  650/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.698
+1316.6s	169	  Step  700/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.699
+1322.3s	170	  Step  750/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.700
+1326.0s	171	  Step  782/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.701
+1326.0s	172	
+1326.0s	173	--- Epoch 3 Summary ---
+1326.0s	174	   🧠 Tumor  | Loss: 0.8230 | ET Dice: 0.3862
+1326.0s	175	   🩸 Stroke | Loss: 1.3137 | Dice:    0.1542
+1326.0s	176	   🧬 Alz    | Loss: 0.7007
+1378.5s	177	   🛡️ Alzheimer Val AUC: 0.5142
+1378.7s	178	✅ Epoch 3 Complete.
+1378.7s	179	
+1378.7s	180	============================================================
+1378.7s	181	  EPOCH 4/15 — Round-Robin Training (782 steps)
+1378.7s	182	============================================================
+1378.8s	183	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+1378.8s	184	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+1388.7s	185	   [Step 10 Stroke Debug] Pred mean: 0.2103 | GT mean: 0.0003
+1428.7s	186	  Step   50/782 | Tumor L=0.797 D=0.438 | Stroke L=1.272 D=0.174 | Alz L=0.732
+1478.6s	187	  Step  100/782 | Tumor L=0.797 D=0.414 | Stroke L=1.278 D=0.204 | Alz L=0.714
+1528.3s	188	  Step  150/782 | Tumor L=0.796 D=0.405 | Stroke L=1.272 D=0.197 | Alz L=0.716
+1578.0s	189	  Step  200/782 | Tumor L=0.793 D=0.420 | Stroke L=1.260 D=0.190 | Alz L=0.711
+1628.0s	190	  Step  250/782 | Tumor L=0.790 D=0.429 | Stroke L=1.250 D=0.197 | Alz L=0.711
+1656.0s	191	  Step  300/782 | Tumor L=0.788 D=0.418 | Stroke L=1.250 D=0.197 | Alz L=0.715
+1684.0s	192	  Step  350/782 | Tumor L=0.785 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.716
+1697.8s	193	  Step  400/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.707
+1703.6s	194	  Step  450/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.708
+1709.3s	195	  Step  500/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.706
+1715.0s	196	  Step  550/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.704
+1720.8s	197	  Step  600/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.705
+1726.5s	198	  Step  650/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.713
+1732.3s	199	  Step  700/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.710
+1738.0s	200	  Step  750/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.712
+1741.7s	201	  Step  782/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.713
+1741.7s	202	
+1741.7s	203	--- Epoch 4 Summary ---
+1741.7s	204	   🧠 Tumor  | Loss: 0.7838 | ET Dice: 0.4130
+1741.7s	205	   🩸 Stroke | Loss: 1.2497 | Dice:    0.1968
+1741.7s	206	   🧬 Alz    | Loss: 0.7131
+1794.2s	207	   🛡️ Alzheimer Val AUC: 0.4280
+1794.4s	208	✅ Epoch 4 Complete.
+1794.4s	209	
+1794.4s	210	============================================================
+1794.4s	211	  EPOCH 5/15 — Round-Robin Training (782 steps)
+1794.4s	212	============================================================
+1794.5s	213	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+1794.5s	214	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+1804.4s	215	   [Step 10 Stroke Debug] Pred mean: 0.1692 | GT mean: 0.0000
+1844.5s	216	  Step   50/782 | Tumor L=0.757 D=0.423 | Stroke L=1.206 D=0.197 | Alz L=0.650
+1894.4s	217	  Step  100/782 | Tumor L=0.746 D=0.479 | Stroke L=1.223 D=0.188 | Alz L=0.690
+1944.4s	218	  Step  150/782 | Tumor L=0.746 D=0.468 | Stroke L=1.213 D=0.208 | Alz L=0.682
+1994.4s	219	  Step  200/782 | Tumor L=0.741 D=0.480 | Stroke L=1.204 D=0.211 | Alz L=0.701
+2044.4s	220	  Step  250/782 | Tumor L=0.738 D=0.483 | Stroke L=1.200 D=0.215 | Alz L=0.717
+2072.4s	221	  Step  300/782 | Tumor L=0.734 D=0.489 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2100.3s	222	  Step  350/782 | Tumor L=0.732 D=0.485 | Stroke L=1.200 D=0.215 | Alz L=0.726
+2113.9s	223	  Step  400/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.733
+2119.7s	224	  Step  450/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2125.4s	225	  Step  500/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.729
+2131.2s	226	  Step  550/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.727
+2136.9s	227	  Step  600/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.738
+2142.6s	228	  Step  650/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.739
+2148.4s	229	  Step  700/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.732
+2154.2s	230	  Step  750/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.737
+2157.9s	231	  Step  782/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2157.9s	232	
+2157.9s	233	--- Epoch 5 Summary ---
+2157.9s	234	   🧠 Tumor  | Loss: 0.7306 | ET Dice: 0.4822
+2157.9s	235	   🩸 Stroke | Loss: 1.2002 | Dice:    0.2151
+2157.9s	236	   🧬 Alz    | Loss: 0.7339
+2210.3s	237	   🛡️ Alzheimer Val AUC: 0.5035
+2210.5s	238	✅ Epoch 5 Complete.
+2210.5s	239	
+2210.5s	240	🩺 EPOCH 5 HEALTH CHECK:
+2210.5s	241	   Tumor ET Dice: 0.4822 (target > 0.25)
+2210.5s	242	   Stroke Dice:   0.2151 (target > 0.15)
+2210.5s	243	
+2210.5s	244	============================================================
+2210.5s	245	  EPOCH 6/15 — Round-Robin Training (782 steps)
+2210.5s	246	============================================================
+2210.6s	247	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+2210.6s	248	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+2220.4s	249	   [Step 10 Stroke Debug] Pred mean: 0.1376 | GT mean: 0.0000
+2260.3s	250	  Step   50/782 | Tumor L=0.675 D=0.572 | Stroke L=1.208 D=0.240 | Alz L=0.764
+2310.6s	251	  Step  100/782 | Tumor L=0.676 D=0.558 | Stroke L=1.182 D=0.237 | Alz L=0.727
+2360.6s	252	  Step  150/782 | Tumor L=0.674 D=0.543 | Stroke L=1.190 D=0.249 | Alz L=0.721
+2410.5s	253	  Step  200/782 | Tumor L=0.670 D=0.554 | Stroke L=1.176 D=0.243 | Alz L=0.744
+2460.3s	254	  Step  250/782 | Tumor L=0.662 D=0.569 | Stroke L=1.166 D=0.234 | Alz L=0.749
+2488.1s	255	  Step  300/782 | Tumor L=0.658 D=0.570 | Stroke L=1.166 D=0.234 | Alz L=0.741
+2515.9s	256	  Step  350/782 | Tumor L=0.655 D=0.561 | Stroke L=1.166 D=0.234 | Alz L=0.742
+2529.6s	257	  Step  400/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.738
+2535.3s	258	  Step  450/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.736
+2541.0s	259	  Step  500/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.728
+2546.8s	260	  Step  550/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.724
+2552.5s	261	  Step  600/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.739
+2558.2s	262	  Step  650/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.747
+2564.0s	263	  Step  700/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.750
+2569.7s	264	  Step  750/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.750
+2573.4s	265	  Step  782/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.748
+2573.4s	266	
+2573.4s	267	--- Epoch 6 Summary ---
+2573.4s	268	   🧠 Tumor  | Loss: 0.6518 | ET Dice: 0.5625
+2573.4s	269	   🩸 Stroke | Loss: 1.1659 | Dice:    0.2338
+2573.4s	270	   🧬 Alz    | Loss: 0.7476
+2625.8s	271	   🛡️ Alzheimer Val AUC: 0.4680
+2625.9s	272	✅ Epoch 6 Complete.
+2625.9s	273	
+2625.9s	274	============================================================
+2625.9s	275	  EPOCH 7/15 — Round-Robin Training (782 steps)
+2625.9s	276	============================================================
+2626.1s	277	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+2626.1s	278	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+2636.0s	279	   [Step 10 Stroke Debug] Pred mean: 0.1106 | GT mean: 0.0016
+2676.1s	280	  Step   50/782 | Tumor L=0.614 D=0.559 | Stroke L=1.122 D=0.214 | Alz L=0.724
+2726.0s	281	  Step  100/782 | Tumor L=0.604 D=0.566 | Stroke L=1.132 D=0.248 | Alz L=0.747
+2776.1s	282	  Step  150/782 | Tumor L=0.591 D=0.600 | Stroke L=1.147 D=0.253 | Alz L=0.764
+2826.2s	283	  Step  200/782 | Tumor L=0.586 D=0.609 | Stroke L=1.142 D=0.235 | Alz L=0.768
+2876.3s	284	  Step  250/782 | Tumor L=0.583 D=0.606 | Stroke L=1.133 D=0.243 | Alz L=0.757
+2904.2s	285	  Step  300/782 | Tumor L=0.575 D=0.610 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2932.2s	286	  Step  350/782 | Tumor L=0.572 D=0.608 | Stroke L=1.133 D=0.243 | Alz L=0.755
+2945.9s	287	  Step  400/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2951.6s	288	  Step  450/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2957.4s	289	  Step  500/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.759
+2963.2s	290	  Step  550/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.755
+2968.9s	291	  Step  600/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2974.6s	292	  Step  650/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2980.4s	293	  Step  700/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2986.1s	294	  Step  750/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2989.8s	295	  Step  782/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2989.8s	296	
+2989.8s	297	--- Epoch 7 Summary ---
+2989.8s	298	   🧠 Tumor  | Loss: 0.5694 | ET Dice: 0.6123
+2989.8s	299	   🩸 Stroke | Loss: 1.1325 | Dice:    0.2429
+2989.8s	300	   🧬 Alz    | Loss: 0.7643
+3042.4s	301	   🛡️ Alzheimer Val AUC: 0.5073
+3042.5s	302	✅ Epoch 7 Complete.
+3042.5s	303	
+3042.5s	304	============================================================
+3042.5s	305	  EPOCH 8/15 — Round-Robin Training (782 steps)
+3042.5s	306	============================================================
+3042.6s	307	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+3042.6s	308	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+3052.5s	309	   [Step 10 Stroke Debug] Pred mean: 0.0926 | GT mean: 0.0048
+3092.4s	310	  Step   50/782 | Tumor L=0.521 D=0.627 | Stroke L=1.161 D=0.236 | Alz L=0.813
+3142.0s	311	  Step  100/782 | Tumor L=0.527 D=0.593 | Stroke L=1.128 D=0.273 | Alz L=0.778
+3191.9s	312	  Step  150/782 | Tumor L=0.524 D=0.600 | Stroke L=1.113 D=0.268 | Alz L=0.759
+3241.8s	313	  Step  200/782 | Tumor L=0.523 D=0.594 | Stroke L=1.113 D=0.255 | Alz L=0.755
+3291.8s	314	  Step  250/782 | Tumor L=0.513 D=0.609 | Stroke L=1.103 D=0.256 | Alz L=0.753
+3319.8s	315	  Step  300/782 | Tumor L=0.510 D=0.624 | Stroke L=1.103 D=0.256 | Alz L=0.770
+3347.7s	316	  Step  350/782 | Tumor L=0.504 D=0.633 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3361.5s	317	  Step  400/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3367.2s	318	  Step  450/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.770
+3372.9s	319	  Step  500/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.778
+3378.7s	320	  Step  550/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3384.5s	321	  Step  600/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.783
+3390.2s	322	  Step  650/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.792
+3395.9s	323	  Step  700/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.793
+3401.7s	324	  Step  750/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.791
+3405.3s	325	  Step  782/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.789
+3405.3s	326	
+3405.3s	327	--- Epoch 8 Summary ---
+3405.3s	328	   🧠 Tumor  | Loss: 0.5028 | ET Dice: 0.6372
+3405.3s	329	   🩸 Stroke | Loss: 1.1027 | Dice:    0.2557
+3405.3s	330	   🧬 Alz    | Loss: 0.7893
+3457.8s	331	   🛡️ Alzheimer Val AUC: 0.5167
+3458.0s	332	✅ Epoch 8 Complete.
+3458.0s	333	
+3458.0s	334	============================================================
+3458.0s	335	  EPOCH 9/15 — Round-Robin Training (782 steps)
+3458.0s	336	============================================================
+3458.1s	337	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+3458.1s	338	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+3468.0s	339	   [Step 10 Stroke Debug] Pred mean: 0.0682 | GT mean: 0.0008
+3508.2s	340	  Step   50/782 | Tumor L=0.462 D=0.628 | Stroke L=1.061 D=0.286 | Alz L=0.702
+3558.3s	341	  Step  100/782 | Tumor L=0.453 D=0.658 | Stroke L=1.057 D=0.276 | Alz L=0.756
+6.6s	342	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+6.6s	343	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+6.6s	344	0.00s - to python to disable frozen modules.
+6.6s	345	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+7.2s	346	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+7.2s	347	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+7.2s	348	0.00s - to python to disable frozen modules.
+7.2s	349	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+9.3s	350	Found existing installation: protobuf 5.29.5
+9.3s	351	Uninstalling protobuf-5.29.5:
+9.3s	352	  Successfully uninstalled protobuf-5.29.5
+9.8s	353	Found existing installation: tensorboard 2.19.0
+9.8s	354	Uninstalling tensorboard-2.19.0:
+10.0s	355	  Successfully uninstalled tensorboard-2.19.0
+10.6s	356	[33mWARNING: Skipping tb-nightly as it is not installed.[0m[33m
+13.9s	357	[0m[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/2.7 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━[0m[90m╺[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.3/2.7 MB[0m [31m9.9 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m2.7/2.7 MB[0m [31m39.4 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m2.7/2.7 MB[0m [31m30.2 MB/s[0m eta [36m0:00:00[0m
+14.0s	358	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/740.3 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m740.3/740.3 kB[0m [31m30.5 MB/s[0m eta [36m0:00:00[0m
+14.0s	359	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/2.0 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m2.0/2.0 MB[0m [31m91.4 MB/s[0m eta [36m0:00:00[0m
+14.0s	360	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/138.3 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m138.3/138.3 kB[0m [31m13.1 MB/s[0m eta [36m0:00:00[0m
+14.1s	361	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/9.1 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m[90m━━━━━[0m [32m8.0/9.1 MB[0m [31m239.7 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m9.1/9.1 MB[0m [31m228.8 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m9.1/9.1 MB[0m [31m115.8 MB/s[0m eta [36m0:00:00[0m
+14.2s	362	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/323.5 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m323.5/323.5 kB[0m [31m27.5 MB/s[0m eta [36m0:00:00[0m
+14.3s	363	[?25h[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/6.9 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━[0m[91m╸[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m1.8/6.9 MB[0m [31m194.0 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m6.9/6.9 MB[0m [31m120.4 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m6.9/6.9 MB[0m [31m78.4 MB/s[0m eta [36m0:00:00[0m
+20.6s	364	[?25h[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+20.6s	365	google-adk 1.22.1 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+20.6s	366	bigframes 2.26.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+20.6s	367	tensorflow 2.19.0 requires tensorboard~=2.19.0, which is not installed.
+20.6s	368	google-cloud-translate 3.12.1 requires protobuf!=3.20.0,!=3.20.1,!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<5.0.0dev,>=3.19.5, but you have protobuf 6.33.5 which is incompatible.
+20.6s	369	google-ai-generativelanguage 0.6.15 requires protobuf!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<6.0.0dev,>=3.20.2, but you have protobuf 6.33.5 which is incompatible.
+20.6s	370	bigframes 2.26.0 requires rich<14,>=12.4.4, but you have rich 14.2.0 which is incompatible.
+20.6s	371	tensorflow 2.19.0 requires protobuf!=4.21.0,!=4.21.1,!=4.21.2,!=4.21.3,!=4.21.4,!=4.21.5,<6.0.0dev,>=3.20.3, but you have protobuf 6.33.5 which is incompatible.
+20.6s	372	grpcio-status 1.71.2 requires protobuf<6.0dev,>=5.26.1, but you have protobuf 6.33.5 which is incompatible.
+20.6s	373	gcsfs 2025.3.0 requires fsspec==2025.3.0, but you have fsspec 2025.10.0 which is incompatible.[0m[31m
+22.3s	374	[0mCollecting protobuf==3.20.3
+22.3s	375	  Downloading protobuf-3.20.3-py2.py3-none-any.whl.metadata (720 bytes)
+22.4s	376	Collecting tensorboard==2.16.2
+22.4s	377	  Downloading tensorboard-2.16.2-py3-none-any.whl.metadata (1.6 kB)
+22.4s	378	Requirement already satisfied: absl-py>=0.4 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.4.0)
+22.4s	379	Requirement already satisfied: grpcio>=1.48.2 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.75.1)
+22.4s	380	Requirement already satisfied: markdown>=2.6.8 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (3.9)
+22.4s	381	Requirement already satisfied: numpy>=1.12.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (2.0.2)
+22.5s	382	Requirement already satisfied: setuptools>=41.0.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (75.2.0)
+22.5s	383	Requirement already satisfied: six>1.9 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (1.17.0)
+22.5s	384	Requirement already satisfied: tensorboard-data-server<0.8.0,>=0.7.0 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (0.7.2)
+22.5s	385	Requirement already satisfied: werkzeug>=1.0.1 in /usr/local/lib/python3.12/dist-packages (from tensorboard==2.16.2) (3.1.3)
+22.5s	386	Requirement already satisfied: typing-extensions~=4.12 in /usr/local/lib/python3.12/dist-packages (from grpcio>=1.48.2->tensorboard==2.16.2) (4.15.0)
+22.5s	387	Requirement already satisfied: MarkupSafe>=2.1.1 in /usr/local/lib/python3.12/dist-packages (from werkzeug>=1.0.1->tensorboard==2.16.2) (3.0.3)
+22.5s	388	Downloading protobuf-3.20.3-py2.py3-none-any.whl (162 kB)
+22.5s	389	[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/162.1 kB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m162.1/162.1 kB[0m [31m4.8 MB/s[0m eta [36m0:00:00[0m
+22.5s	390	[?25hDownloading tensorboard-2.16.2-py3-none-any.whl (5.5 MB)
+22.6s	391	[?25l   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m0.0/5.5 MB[0m [31m?[0m eta [36m-:--:--[0m
+[2K   [91m━━━━━━━━━━[0m[90m╺[0m[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m1.4/5.5 MB[0m [31m46.6 MB/s[0m eta [36m0:00:01[0m
+[2K   [91m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m[91m╸[0m [32m5.5/5.5 MB[0m [31m96.1 MB/s[0m eta [36m0:00:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m5.5/5.5 MB[0m [31m66.1 MB/s[0m eta [36m0:00:00[0m
+24.7s	392	[?25hInstalling collected packages: protobuf, tensorboard
+24.7s	393	  Attempting uninstall: protobuf
+24.7s	394	    Found existing installation: protobuf 6.33.5
+24.7s	395	    Uninstalling protobuf-6.33.5:
+24.7s	396	      Successfully uninstalled protobuf-6.33.5
+25.2s	397	[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+25.2s	398	google-adk 1.22.1 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+25.2s	399	bigframes 2.26.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+25.2s	400	a2a-sdk 0.3.22 requires protobuf>=5.29.5, but you have protobuf 3.20.3 which is incompatible.
+25.2s	401	onnx 1.20.1 requires protobuf>=4.25.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	402	opentelemetry-proto 1.37.0 requires protobuf<7.0,>=5.0, but you have protobuf 3.20.3 which is incompatible.
+25.2s	403	tensorflow-metadata 1.17.2 requires protobuf>=4.25.2; python_version >= "3.11", but you have protobuf 3.20.3 which is incompatible.
+25.2s	404	ydf 0.13.0 requires protobuf<7.0.0,>=5.29.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	405	bigframes 2.26.0 requires rich<14,>=12.4.4, but you have rich 14.2.0 which is incompatible.
+25.2s	406	tensorflow 2.19.0 requires tensorboard~=2.19.0, but you have tensorboard 2.16.2 which is incompatible.
+25.2s	407	grpcio-status 1.71.2 requires protobuf<6.0dev,>=5.26.1, but you have protobuf 3.20.3 which is incompatible.
+25.2s	408	gcsfs 2025.3.0 requires fsspec==2025.3.0, but you have fsspec 2025.10.0 which is incompatible.[0m[31m
+25.2s	409	[0mSuccessfully installed protobuf-3.20.3 tensorboard-2.16.2
+25.4s	410	✅ Setup Complete. Protobuf Version: 3.20.3
+25.4s	411	Writing app.py
+31.8s	412	================================================================================
+31.8s	413	🔍 GLOBAL SAFETY CHECKS
+32.0s	414	CUDA Available: True
+32.0s	415	Device: Tesla T4
+32.0s	416	================================================================================
+35.6s	417	✅ Tumor Dataset: 368 cases
+42.0s	418	✅ Stroke Dataset: 250 cases
+52.3s	419	✅ Alzheimer Split:
+52.3s	420	   Train: Counter({1: 405, 0: 377})
+52.3s	421	   Val:   Counter({1: 101, 0: 95})
+57.2s	422	/kaggle/working/app.py:568: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+57.2s	423	  scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
+57.2s	424	
+57.2s	425	🔍 PRE-TRAINING BATCH CHECK 🔍
+57.9s	426	✅ Tumor Batch: Img torch.Size([1, 1, 96, 96, 96]) Range [-0.42, 7.60] | Seg torch.Size([1, 3, 96, 96, 96]) Sum 12466
+58.2s	427	✅ Stroke Batch: Img torch.Size([1, 1, 96, 96, 96]) Range [-0.43, 6.06] | Seg torch.Size([1, 1, 96, 96, 96]) Sum 639
+58.2s	428	========================================
+58.2s	429	
+58.2s	430	🚀 Starting Training (DEBUG=False, EPOCHS=15)...
+59.1s	431	
+59.1s	432	============================================================
+59.1s	433	  EPOCH 1/15 — Round-Robin Training (782 steps)
+59.1s	434	============================================================
+59.9s	435	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+59.9s	436	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+70.2s	437	   [Step 10 Stroke Debug] Pred mean: 0.4848 | GT mean: 0.0082
+105.5s	438	  Step   50/782 | Tumor L=1.102 D=0.078 | Stroke L=1.829 D=0.030 | Alz L=0.705
+154.2s	439	  Step  100/782 | Tumor L=1.076 D=0.118 | Stroke L=1.768 D=0.029 | Alz L=0.709
+204.8s	440	  Step  150/782 | Tumor L=1.052 D=0.138 | Stroke L=1.707 D=0.038 | Alz L=0.709
+255.3s	441	  Step  200/782 | Tumor L=1.031 D=0.162 | Stroke L=1.659 D=0.048 | Alz L=0.706
+305.3s	442	  Step  250/782 | Tumor L=1.013 D=0.178 | Stroke L=1.620 D=0.071 | Alz L=0.703
+333.6s	443	  Step  300/782 | Tumor L=0.997 D=0.194 | Stroke L=1.620 D=0.071 | Alz L=0.702
+361.8s	444	  Step  350/782 | Tumor L=0.984 D=0.207 | Stroke L=1.620 D=0.071 | Alz L=0.702
+380.8s	445	  Step  400/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+395.7s	446	  Step  450/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+409.7s	447	  Step  500/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+424.2s	448	  Step  550/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+439.4s	449	  Step  600/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.701
+454.0s	450	  Step  650/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+469.7s	451	  Step  700/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+483.7s	452	  Step  750/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+493.1s	453	  Step  782/782 | Tumor L=0.979 D=0.212 | Stroke L=1.620 D=0.071 | Alz L=0.700
+493.1s	454	
+493.1s	455	--- Epoch 1 Summary ---
+493.1s	456	   🧠 Tumor  | Loss: 0.9792 | ET Dice: 0.2118
+493.1s	457	   🩸 Stroke | Loss: 1.6200 | Dice:    0.0708
+493.1s	458	   🧬 Alz    | Loss: 0.6997
+546.0s	459	   🛡️ Alzheimer Val AUC: 0.5881
+546.1s	460	✅ Epoch 1 Complete.
+546.1s	461	
+546.1s	462	============================================================
+546.1s	463	  EPOCH 2/15 — Round-Robin Training (782 steps)
+546.1s	464	============================================================
+546.3s	465	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+546.3s	466	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+556.0s	467	   [Step 10 Stroke Debug] Pred mean: 0.3215 | GT mean: 0.0008
+596.4s	468	  Step   50/782 | Tumor L=0.891 D=0.258 | Stroke L=1.426 D=0.106 | Alz L=0.691
+646.6s	469	  Step  100/782 | Tumor L=0.886 D=0.298 | Stroke L=1.420 D=0.112 | Alz L=0.690
+696.4s	470	  Step  150/782 | Tumor L=0.881 D=0.324 | Stroke L=1.412 D=0.123 | Alz L=0.693
+746.4s	471	  Step  200/782 | Tumor L=0.877 D=0.327 | Stroke L=1.398 D=0.120 | Alz L=0.694
+796.5s	472	  Step  250/782 | Tumor L=0.874 D=0.334 | Stroke L=1.391 D=0.132 | Alz L=0.694
+824.3s	473	  Step  300/782 | Tumor L=0.871 D=0.341 | Stroke L=1.391 D=0.132 | Alz L=0.694
+852.3s	474	  Step  350/782 | Tumor L=0.867 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+866.0s	475	  Step  400/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+871.8s	476	  Step  450/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.693
+877.5s	477	  Step  500/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+883.3s	478	  Step  550/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+889.0s	479	  Step  600/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.696
+894.7s	480	  Step  650/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+900.5s	481	  Step  700/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.696
+906.2s	482	  Step  750/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+909.9s	483	  Step  782/782 | Tumor L=0.866 D=0.358 | Stroke L=1.391 D=0.132 | Alz L=0.695
+909.9s	484	
+909.9s	485	--- Epoch 2 Summary ---
+909.9s	486	   🧠 Tumor  | Loss: 0.8659 | ET Dice: 0.3578
+909.9s	487	   🩸 Stroke | Loss: 1.3912 | Dice:    0.1321
+909.9s	488	   🧬 Alz    | Loss: 0.6954
+962.4s	489	   🛡️ Alzheimer Val AUC: 0.4862
+962.6s	490	✅ Epoch 2 Complete.
+962.6s	491	
+962.6s	492	============================================================
+962.6s	493	  EPOCH 3/15 — Round-Robin Training (782 steps)
+962.6s	494	============================================================
+962.8s	495	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+962.8s	496	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+972.7s	497	   [Step 10 Stroke Debug] Pred mean: 0.2569 | GT mean: 0.0013
+1012.6s	498	  Step   50/782 | Tumor L=0.841 D=0.326 | Stroke L=1.326 D=0.146 | Alz L=0.692
+1062.7s	499	  Step  100/782 | Tumor L=0.836 D=0.367 | Stroke L=1.339 D=0.142 | Alz L=0.689
+1112.6s	500	  Step  150/782 | Tumor L=0.833 D=0.392 | Stroke L=1.322 D=0.157 | Alz L=0.690
+1162.3s	501	  Step  200/782 | Tumor L=0.831 D=0.386 | Stroke L=1.322 D=0.155 | Alz L=0.697
+1212.4s	502	  Step  250/782 | Tumor L=0.829 D=0.389 | Stroke L=1.314 D=0.154 | Alz L=0.696
+1240.4s	503	  Step  300/782 | Tumor L=0.827 D=0.378 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1268.4s	504	  Step  350/782 | Tumor L=0.824 D=0.388 | Stroke L=1.314 D=0.154 | Alz L=0.699
+1282.1s	505	  Step  400/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.700
+1287.9s	506	  Step  450/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.698
+1293.6s	507	  Step  500/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.695
+1299.4s	508	  Step  550/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1305.1s	509	  Step  600/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.693
+1310.9s	510	  Step  650/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.698
+1316.6s	511	  Step  700/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.699
+1322.3s	512	  Step  750/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.700
+1326.0s	513	  Step  782/782 | Tumor L=0.823 D=0.386 | Stroke L=1.314 D=0.154 | Alz L=0.701
+1326.0s	514	
+1326.0s	515	--- Epoch 3 Summary ---
+1326.0s	516	   🧠 Tumor  | Loss: 0.8230 | ET Dice: 0.3862
+1326.0s	517	   🩸 Stroke | Loss: 1.3137 | Dice:    0.1542
+1326.0s	518	   🧬 Alz    | Loss: 0.7007
+1378.5s	519	   🛡️ Alzheimer Val AUC: 0.5142
+1378.7s	520	✅ Epoch 3 Complete.
+1378.7s	521	
+1378.7s	522	============================================================
+1378.7s	523	  EPOCH 4/15 — Round-Robin Training (782 steps)
+1378.7s	524	============================================================
+1378.8s	525	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+1378.8s	526	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+1388.7s	527	   [Step 10 Stroke Debug] Pred mean: 0.2103 | GT mean: 0.0003
+1428.7s	528	  Step   50/782 | Tumor L=0.797 D=0.438 | Stroke L=1.272 D=0.174 | Alz L=0.732
+1478.6s	529	  Step  100/782 | Tumor L=0.797 D=0.414 | Stroke L=1.278 D=0.204 | Alz L=0.714
+1528.3s	530	  Step  150/782 | Tumor L=0.796 D=0.405 | Stroke L=1.272 D=0.197 | Alz L=0.716
+1578.0s	531	  Step  200/782 | Tumor L=0.793 D=0.420 | Stroke L=1.260 D=0.190 | Alz L=0.711
+1628.0s	532	  Step  250/782 | Tumor L=0.790 D=0.429 | Stroke L=1.250 D=0.197 | Alz L=0.711
+1656.0s	533	  Step  300/782 | Tumor L=0.788 D=0.418 | Stroke L=1.250 D=0.197 | Alz L=0.715
+1684.0s	534	  Step  350/782 | Tumor L=0.785 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.716
+1697.8s	535	  Step  400/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.707
+1703.6s	536	  Step  450/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.708
+1709.3s	537	  Step  500/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.706
+1715.0s	538	  Step  550/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.704
+1720.8s	539	  Step  600/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.705
+1726.5s	540	  Step  650/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.713
+1732.3s	541	  Step  700/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.710
+1738.0s	542	  Step  750/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.712
+1741.7s	543	  Step  782/782 | Tumor L=0.784 D=0.413 | Stroke L=1.250 D=0.197 | Alz L=0.713
+1741.7s	544	
+1741.7s	545	--- Epoch 4 Summary ---
+1741.7s	546	   🧠 Tumor  | Loss: 0.7838 | ET Dice: 0.4130
+1741.7s	547	   🩸 Stroke | Loss: 1.2497 | Dice:    0.1968
+1741.7s	548	   🧬 Alz    | Loss: 0.7131
+1794.2s	549	   🛡️ Alzheimer Val AUC: 0.4280
+1794.4s	550	✅ Epoch 4 Complete.
+1794.4s	551	
+1794.4s	552	============================================================
+1794.4s	553	  EPOCH 5/15 — Round-Robin Training (782 steps)
+1794.4s	554	============================================================
+1794.5s	555	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+1794.5s	556	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+1804.4s	557	   [Step 10 Stroke Debug] Pred mean: 0.1692 | GT mean: 0.0000
+1844.5s	558	  Step   50/782 | Tumor L=0.757 D=0.423 | Stroke L=1.206 D=0.197 | Alz L=0.650
+1894.4s	559	  Step  100/782 | Tumor L=0.746 D=0.479 | Stroke L=1.223 D=0.188 | Alz L=0.690
+1944.4s	560	  Step  150/782 | Tumor L=0.746 D=0.468 | Stroke L=1.213 D=0.208 | Alz L=0.682
+1994.4s	561	  Step  200/782 | Tumor L=0.741 D=0.480 | Stroke L=1.204 D=0.211 | Alz L=0.701
+2044.4s	562	  Step  250/782 | Tumor L=0.738 D=0.483 | Stroke L=1.200 D=0.215 | Alz L=0.717
+2072.4s	563	  Step  300/782 | Tumor L=0.734 D=0.489 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2100.3s	564	  Step  350/782 | Tumor L=0.732 D=0.485 | Stroke L=1.200 D=0.215 | Alz L=0.726
+2113.9s	565	  Step  400/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.733
+2119.7s	566	  Step  450/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2125.4s	567	  Step  500/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.729
+2131.2s	568	  Step  550/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.727
+2136.9s	569	  Step  600/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.738
+2142.6s	570	  Step  650/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.739
+2148.4s	571	  Step  700/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.732
+2154.2s	572	  Step  750/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.737
+2157.9s	573	  Step  782/782 | Tumor L=0.731 D=0.482 | Stroke L=1.200 D=0.215 | Alz L=0.734
+2157.9s	574	
+2157.9s	575	--- Epoch 5 Summary ---
+2157.9s	576	   🧠 Tumor  | Loss: 0.7306 | ET Dice: 0.4822
+2157.9s	577	   🩸 Stroke | Loss: 1.2002 | Dice:    0.2151
+2157.9s	578	   🧬 Alz    | Loss: 0.7339
+2210.3s	579	   🛡️ Alzheimer Val AUC: 0.5035
+2210.5s	580	✅ Epoch 5 Complete.
+2210.5s	581	
+2210.5s	582	🩺 EPOCH 5 HEALTH CHECK:
+2210.5s	583	   Tumor ET Dice: 0.4822 (target > 0.25)
+2210.5s	584	   Stroke Dice:   0.2151 (target > 0.15)
+2210.5s	585	
+2210.5s	586	============================================================
+2210.5s	587	  EPOCH 6/15 — Round-Robin Training (782 steps)
+2210.5s	588	============================================================
+2210.6s	589	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+2210.6s	590	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+2220.4s	591	   [Step 10 Stroke Debug] Pred mean: 0.1376 | GT mean: 0.0000
+2260.3s	592	  Step   50/782 | Tumor L=0.675 D=0.572 | Stroke L=1.208 D=0.240 | Alz L=0.764
+2310.6s	593	  Step  100/782 | Tumor L=0.676 D=0.558 | Stroke L=1.182 D=0.237 | Alz L=0.727
+2360.6s	594	  Step  150/782 | Tumor L=0.674 D=0.543 | Stroke L=1.190 D=0.249 | Alz L=0.721
+2410.5s	595	  Step  200/782 | Tumor L=0.670 D=0.554 | Stroke L=1.176 D=0.243 | Alz L=0.744
+2460.3s	596	  Step  250/782 | Tumor L=0.662 D=0.569 | Stroke L=1.166 D=0.234 | Alz L=0.749
+2488.1s	597	  Step  300/782 | Tumor L=0.658 D=0.570 | Stroke L=1.166 D=0.234 | Alz L=0.741
+2515.9s	598	  Step  350/782 | Tumor L=0.655 D=0.561 | Stroke L=1.166 D=0.234 | Alz L=0.742
+2529.6s	599	  Step  400/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.738
+2535.3s	600	  Step  450/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.736
+2541.0s	601	  Step  500/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.728
+2546.8s	602	  Step  550/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.724
+2552.5s	603	  Step  600/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.739
+2558.2s	604	  Step  650/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.747
+2564.0s	605	  Step  700/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.750
+2569.7s	606	  Step  750/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.750
+2573.4s	607	  Step  782/782 | Tumor L=0.652 D=0.563 | Stroke L=1.166 D=0.234 | Alz L=0.748
+2573.4s	608	
+2573.4s	609	--- Epoch 6 Summary ---
+2573.4s	610	   🧠 Tumor  | Loss: 0.6518 | ET Dice: 0.5625
+2573.4s	611	   🩸 Stroke | Loss: 1.1659 | Dice:    0.2338
+2573.4s	612	   🧬 Alz    | Loss: 0.7476
+2625.8s	613	   🛡️ Alzheimer Val AUC: 0.4680
+2625.9s	614	✅ Epoch 6 Complete.
+2625.9s	615	
+2625.9s	616	============================================================
+2625.9s	617	  EPOCH 7/15 — Round-Robin Training (782 steps)
+2625.9s	618	============================================================
+2626.1s	619	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+2626.1s	620	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+2636.0s	621	   [Step 10 Stroke Debug] Pred mean: 0.1106 | GT mean: 0.0016
+2676.1s	622	  Step   50/782 | Tumor L=0.614 D=0.559 | Stroke L=1.122 D=0.214 | Alz L=0.724
+2726.0s	623	  Step  100/782 | Tumor L=0.604 D=0.566 | Stroke L=1.132 D=0.248 | Alz L=0.747
+2776.1s	624	  Step  150/782 | Tumor L=0.591 D=0.600 | Stroke L=1.147 D=0.253 | Alz L=0.764
+2826.2s	625	  Step  200/782 | Tumor L=0.586 D=0.609 | Stroke L=1.142 D=0.235 | Alz L=0.768
+2876.3s	626	  Step  250/782 | Tumor L=0.583 D=0.606 | Stroke L=1.133 D=0.243 | Alz L=0.757
+2904.2s	627	  Step  300/782 | Tumor L=0.575 D=0.610 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2932.2s	628	  Step  350/782 | Tumor L=0.572 D=0.608 | Stroke L=1.133 D=0.243 | Alz L=0.755
+2945.9s	629	  Step  400/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2951.6s	630	  Step  450/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2957.4s	631	  Step  500/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.759
+2963.2s	632	  Step  550/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.755
+2968.9s	633	  Step  600/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2974.6s	634	  Step  650/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2980.4s	635	  Step  700/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2986.1s	636	  Step  750/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.760
+2989.8s	637	  Step  782/782 | Tumor L=0.569 D=0.612 | Stroke L=1.133 D=0.243 | Alz L=0.764
+2989.8s	638	
+2989.8s	639	--- Epoch 7 Summary ---
+2989.8s	640	   🧠 Tumor  | Loss: 0.5694 | ET Dice: 0.6123
+2989.8s	641	   🩸 Stroke | Loss: 1.1325 | Dice:    0.2429
+2989.8s	642	   🧬 Alz    | Loss: 0.7643
+3042.4s	643	   🛡️ Alzheimer Val AUC: 0.5073
+3042.5s	644	✅ Epoch 7 Complete.
+3042.5s	645	
+3042.5s	646	============================================================
+3042.5s	647	  EPOCH 8/15 — Round-Robin Training (782 steps)
+3042.5s	648	============================================================
+3042.6s	649	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+3042.6s	650	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+3052.5s	651	   [Step 10 Stroke Debug] Pred mean: 0.0926 | GT mean: 0.0048
+3092.4s	652	  Step   50/782 | Tumor L=0.521 D=0.627 | Stroke L=1.161 D=0.236 | Alz L=0.813
+3142.0s	653	  Step  100/782 | Tumor L=0.527 D=0.593 | Stroke L=1.128 D=0.273 | Alz L=0.778
+3191.9s	654	  Step  150/782 | Tumor L=0.524 D=0.600 | Stroke L=1.113 D=0.268 | Alz L=0.759
+3241.8s	655	  Step  200/782 | Tumor L=0.523 D=0.594 | Stroke L=1.113 D=0.255 | Alz L=0.755
+3291.8s	656	  Step  250/782 | Tumor L=0.513 D=0.609 | Stroke L=1.103 D=0.256 | Alz L=0.753
+3319.8s	657	  Step  300/782 | Tumor L=0.510 D=0.624 | Stroke L=1.103 D=0.256 | Alz L=0.770
+3347.7s	658	  Step  350/782 | Tumor L=0.504 D=0.633 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3361.5s	659	  Step  400/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3367.2s	660	  Step  450/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.770
+3372.9s	661	  Step  500/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.778
+3378.7s	662	  Step  550/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.782
+3384.5s	663	  Step  600/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.783
+3390.2s	664	  Step  650/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.792
+3395.9s	665	  Step  700/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.793
+3401.7s	666	  Step  750/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.791
+3405.3s	667	  Step  782/782 | Tumor L=0.503 D=0.637 | Stroke L=1.103 D=0.256 | Alz L=0.789
+3405.3s	668	
+3405.3s	669	--- Epoch 8 Summary ---
+3405.3s	670	   🧠 Tumor  | Loss: 0.5028 | ET Dice: 0.6372
+3405.3s	671	   🩸 Stroke | Loss: 1.1027 | Dice:    0.2557
+3405.3s	672	   🧬 Alz    | Loss: 0.7893
+3457.8s	673	   🛡️ Alzheimer Val AUC: 0.5167
+3458.0s	674	✅ Epoch 8 Complete.
+3458.0s	675	
+3458.0s	676	============================================================
+3458.0s	677	  EPOCH 9/15 — Round-Robin Training (782 steps)
+3458.0s	678	============================================================
+3458.1s	679	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+3458.1s	680	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+3468.0s	681	   [Step 10 Stroke Debug] Pred mean: 0.0682 | GT mean: 0.0008
+3508.2s	682	  Step   50/782 | Tumor L=0.462 D=0.628 | Stroke L=1.061 D=0.286 | Alz L=0.702
+3558.3s	683	  Step  100/782 | Tumor L=0.453 D=0.658 | Stroke L=1.057 D=0.276 | Alz L=0.756
+3608.4s	684	  Step  150/782 | Tumor L=0.463 D=0.644 | Stroke L=1.061 D=0.282 | Alz L=0.791
+3658.5s	685	  Step  200/782 | Tumor L=0.460 D=0.648 | Stroke L=1.059 D=0.276 | Alz L=0.792
+3708.5s	686	  Step  250/782 | Tumor L=0.457 D=0.651 | Stroke L=1.074 D=0.263 | Alz L=0.800
+3736.5s	687	  Step  300/782 | Tumor L=0.458 D=0.644 | Stroke L=1.074 D=0.263 | Alz L=0.806
+3764.4s	688	  Step  350/782 | Tumor L=0.455 D=0.645 | Stroke L=1.074 D=0.263 | Alz L=0.797
+3778.2s	689	  Step  400/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.795
+3783.9s	690	  Step  450/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.795
+3789.6s	691	  Step  500/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.792
+3795.4s	692	  Step  550/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.791
+3801.1s	693	  Step  600/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.786
+3806.9s	694	  Step  650/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.796
+3812.6s	695	  Step  700/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.793
+3818.4s	696	  Step  750/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.786
+3822.0s	697	  Step  782/782 | Tumor L=0.456 D=0.643 | Stroke L=1.074 D=0.263 | Alz L=0.791
+3822.0s	698	
+3822.0s	699	--- Epoch 9 Summary ---
+3822.0s	700	   🧠 Tumor  | Loss: 0.4556 | ET Dice: 0.6428
+3822.0s	701	   🩸 Stroke | Loss: 1.0738 | Dice:    0.2627
+3822.0s	702	   🧬 Alz    | Loss: 0.7907
+3874.5s	703	   🛡️ Alzheimer Val AUC: 0.4932
+3874.6s	704	✅ Epoch 9 Complete.
+3874.6s	705	
+3874.6s	706	============================================================
+3874.6s	707	  EPOCH 10/15 — Round-Robin Training (782 steps)
+3874.6s	708	============================================================
+3874.8s	709	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+3874.8s	710	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+3884.7s	711	   [Step 10 Stroke Debug] Pred mean: 0.0607 | GT mean: 0.0029
+3924.7s	712	  Step   50/782 | Tumor L=0.443 D=0.664 | Stroke L=1.077 D=0.283 | Alz L=0.730
+3974.8s	713	  Step  100/782 | Tumor L=0.440 D=0.640 | Stroke L=1.043 D=0.296 | Alz L=0.798
+4024.6s	714	  Step  150/782 | Tumor L=0.436 D=0.632 | Stroke L=1.040 D=0.282 | Alz L=0.778
+4074.8s	715	  Step  200/782 | Tumor L=0.428 D=0.640 | Stroke L=1.034 D=0.286 | Alz L=0.777
+4125.0s	716	  Step  250/782 | Tumor L=0.423 D=0.649 | Stroke L=1.048 D=0.276 | Alz L=0.771
+4153.0s	717	  Step  300/782 | Tumor L=0.422 D=0.646 | Stroke L=1.048 D=0.276 | Alz L=0.760
+4181.2s	718	  Step  350/782 | Tumor L=0.418 D=0.652 | Stroke L=1.048 D=0.276 | Alz L=0.760
+4195.0s	719	  Step  400/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.756
+4200.8s	720	  Step  450/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.757
+4206.6s	721	  Step  500/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.763
+4212.4s	722	  Step  550/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.758
+4218.1s	723	  Step  600/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.756
+4223.9s	724	  Step  650/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.759
+4229.6s	725	  Step  700/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.759
+4235.4s	726	  Step  750/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.766
+4239.1s	727	  Step  782/782 | Tumor L=0.419 D=0.651 | Stroke L=1.048 D=0.276 | Alz L=0.770
+4239.1s	728	
+4239.1s	729	--- Epoch 10 Summary ---
+4239.1s	730	   🧠 Tumor  | Loss: 0.4186 | ET Dice: 0.6515
+4239.1s	731	   🩸 Stroke | Loss: 1.0480 | Dice:    0.2759
+4239.1s	732	   🧬 Alz    | Loss: 0.7704
+4291.8s	733	   🛡️ Alzheimer Val AUC: 0.4880
+4291.9s	734	✅ Epoch 10 Complete.
+4291.9s	735	
+4291.9s	736	============================================================
+4291.9s	737	  EPOCH 11/15 — Round-Robin Training (782 steps)
+4291.9s	738	============================================================
+4292.1s	739	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+4292.1s	740	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+4301.9s	741	   [Step 10 Stroke Debug] Pred mean: 0.0576 | GT mean: 0.0148
+4341.8s	742	  Step   50/782 | Tumor L=0.365 D=0.717 | Stroke L=1.030 D=0.324 | Alz L=0.671
+4391.8s	743	  Step  100/782 | Tumor L=0.387 D=0.646 | Stroke L=1.018 D=0.301 | Alz L=0.741
+4441.9s	744	  Step  150/782 | Tumor L=0.381 D=0.654 | Stroke L=1.006 D=0.312 | Alz L=0.749
+4492.0s	745	  Step  200/782 | Tumor L=0.391 D=0.650 | Stroke L=1.021 D=0.298 | Alz L=0.773
+4542.3s	746	  Step  250/782 | Tumor L=0.391 D=0.649 | Stroke L=1.023 D=0.286 | Alz L=0.789
+4570.4s	747	  Step  300/782 | Tumor L=0.390 D=0.648 | Stroke L=1.023 D=0.286 | Alz L=0.785
+4598.5s	748	  Step  350/782 | Tumor L=0.393 D=0.646 | Stroke L=1.023 D=0.286 | Alz L=0.787
+4612.2s	749	  Step  400/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.784
+4618.0s	750	  Step  450/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.775
+4623.8s	751	  Step  500/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.777
+4629.6s	752	  Step  550/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.772
+4635.3s	753	  Step  600/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.772
+4641.1s	754	  Step  650/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.767
+4646.9s	755	  Step  700/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.763
+4652.6s	756	  Step  750/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.763
+4656.3s	757	  Step  782/782 | Tumor L=0.392 D=0.654 | Stroke L=1.023 D=0.286 | Alz L=0.763
+4656.3s	758	
+4656.3s	759	--- Epoch 11 Summary ---
+4656.3s	760	   🧠 Tumor  | Loss: 0.3922 | ET Dice: 0.6538
+4656.3s	761	   🩸 Stroke | Loss: 1.0232 | Dice:    0.2857
+4656.3s	762	   🧬 Alz    | Loss: 0.7631
+4708.9s	763	   🛡️ Alzheimer Val AUC: 0.4743
+4709.1s	764	✅ Epoch 11 Complete.
+4709.1s	765	
+4709.1s	766	============================================================
+4709.1s	767	  EPOCH 12/15 — Round-Robin Training (782 steps)
+4709.1s	768	============================================================
+4709.2s	769	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+4709.2s	770	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+4719.1s	771	   [Step 10 Stroke Debug] Pred mean: 0.0500 | GT mean: 0.0203
+4759.1s	772	  Step   50/782 | Tumor L=0.372 D=0.657 | Stroke L=0.994 D=0.285 | Alz L=0.642
+4809.1s	773	  Step  100/782 | Tumor L=0.374 D=0.633 | Stroke L=0.993 D=0.289 | Alz L=0.693
+4859.4s	774	  Step  150/782 | Tumor L=0.376 D=0.649 | Stroke L=0.996 D=0.296 | Alz L=0.719
+4909.6s	775	  Step  200/782 | Tumor L=0.385 D=0.628 | Stroke L=0.996 D=0.299 | Alz L=0.723
+4959.7s	776	  Step  250/782 | Tumor L=0.376 D=0.643 | Stroke L=1.004 D=0.297 | Alz L=0.726
+4987.6s	777	  Step  300/782 | Tumor L=0.375 D=0.649 | Stroke L=1.004 D=0.297 | Alz L=0.739
+5015.7s	778	  Step  350/782 | Tumor L=0.373 D=0.658 | Stroke L=1.004 D=0.297 | Alz L=0.737
+5029.5s	779	  Step  400/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.749
+5035.2s	780	  Step  450/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.767
+5041.0s	781	  Step  500/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.762
+5046.9s	782	  Step  550/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.746
+5052.6s	783	  Step  600/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.748
+5058.4s	784	  Step  650/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.741
+5064.2s	785	  Step  700/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.739
+5069.9s	786	  Step  750/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.737
+5073.6s	787	  Step  782/782 | Tumor L=0.370 D=0.665 | Stroke L=1.004 D=0.297 | Alz L=0.732
+5073.6s	788	
+5073.6s	789	--- Epoch 12 Summary ---
+5073.6s	790	   🧠 Tumor  | Loss: 0.3704 | ET Dice: 0.6653
+5073.6s	791	   🩸 Stroke | Loss: 1.0037 | Dice:    0.2972
+5073.6s	792	   🧬 Alz    | Loss: 0.7321
+5126.0s	793	   🛡️ Alzheimer Val AUC: 0.4752
+5126.2s	794	✅ Epoch 12 Complete.
+5126.2s	795	
+5126.2s	796	============================================================
+5126.2s	797	  EPOCH 13/15 — Round-Robin Training (782 steps)
+5126.2s	798	============================================================
+5126.3s	799	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+5126.3s	800	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+5136.2s	801	   [Step 10 Stroke Debug] Pred mean: 0.0285 | GT mean: 0.0001
+5176.2s	802	  Step   50/782 | Tumor L=0.373 D=0.679 | Stroke L=0.969 D=0.317 | Alz L=0.683
+5226.1s	803	  Step  100/782 | Tumor L=0.383 D=0.647 | Stroke L=0.951 D=0.315 | Alz L=0.669
+5276.1s	804	  Step  150/782 | Tumor L=0.372 D=0.670 | Stroke L=0.973 D=0.305 | Alz L=0.697
+5326.5s	805	  Step  200/782 | Tumor L=0.371 D=0.672 | Stroke L=0.970 D=0.311 | Alz L=0.716
+5376.8s	806	  Step  250/782 | Tumor L=0.367 D=0.675 | Stroke L=0.978 D=0.311 | Alz L=0.717
+5404.8s	807	  Step  300/782 | Tumor L=0.362 D=0.674 | Stroke L=0.978 D=0.311 | Alz L=0.710
+5432.8s	808	  Step  350/782 | Tumor L=0.360 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.715
+5446.6s	809	  Step  400/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.717
+5452.3s	810	  Step  450/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.705
+5458.1s	811	  Step  500/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.701
+5463.9s	812	  Step  550/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.693
+5469.6s	813	  Step  600/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.685
+5475.3s	814	  Step  650/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.673
+5481.1s	815	  Step  700/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.668
+5486.8s	816	  Step  750/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.668
+5490.5s	817	  Step  782/782 | Tumor L=0.358 D=0.669 | Stroke L=0.978 D=0.311 | Alz L=0.670
+5490.5s	818	
+5490.5s	819	--- Epoch 13 Summary ---
+5490.5s	820	   🧠 Tumor  | Loss: 0.3579 | ET Dice: 0.6694
+5490.5s	821	   🩸 Stroke | Loss: 0.9784 | Dice:    0.3107
+5490.5s	822	   🧬 Alz    | Loss: 0.6698
+5543.1s	823	   🛡️ Alzheimer Val AUC: 0.4633
+5543.2s	824	✅ Epoch 13 Complete.
+5543.2s	825	
+5543.3s	826	============================================================
+5543.3s	827	  EPOCH 14/15 — Round-Robin Training (782 steps)
+5543.3s	828	============================================================
+5543.4s	829	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+5543.4s	830	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+5553.2s	831	   [Step 10 Stroke Debug] Pred mean: 0.0190 | GT mean: 0.0004
+5593.2s	832	  Step   50/782 | Tumor L=0.367 D=0.660 | Stroke L=0.943 D=0.302 | Alz L=0.674
+5643.3s	833	  Step  100/782 | Tumor L=0.346 D=0.645 | Stroke L=0.975 D=0.337 | Alz L=0.594
+5693.4s	834	  Step  150/782 | Tumor L=0.343 D=0.654 | Stroke L=0.962 D=0.338 | Alz L=0.605
+5743.5s	835	  Step  200/782 | Tumor L=0.348 D=0.662 | Stroke L=0.956 D=0.337 | Alz L=0.610
+5793.5s	836	  Step  250/782 | Tumor L=0.344 D=0.658 | Stroke L=0.962 D=0.323 | Alz L=0.613
+5821.4s	837	  Step  300/782 | Tumor L=0.346 D=0.668 | Stroke L=0.962 D=0.323 | Alz L=0.594
+5849.4s	838	  Step  350/782 | Tumor L=0.343 D=0.670 | Stroke L=0.962 D=0.323 | Alz L=0.583
+5863.2s	839	  Step  400/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.611
+5869.0s	840	  Step  450/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.601
+5874.7s	841	  Step  500/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.607
+5880.5s	842	  Step  550/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.605
+5886.2s	843	  Step  600/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.611
+5892.0s	844	  Step  650/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.615
+5897.7s	845	  Step  700/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.608
+5903.5s	846	  Step  750/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.610
+5907.1s	847	  Step  782/782 | Tumor L=0.342 D=0.672 | Stroke L=0.962 D=0.323 | Alz L=0.616
+5907.1s	848	
+5907.1s	849	--- Epoch 14 Summary ---
+5907.1s	850	   🧠 Tumor  | Loss: 0.3419 | ET Dice: 0.6722
+5907.1s	851	   🩸 Stroke | Loss: 0.9624 | Dice:    0.3230
+5907.1s	852	   🧬 Alz    | Loss: 0.6158
+5959.7s	853	   🛡️ Alzheimer Val AUC: 0.4693
+5959.9s	854	✅ Epoch 14 Complete.
+5959.9s	855	
+5959.9s	856	============================================================
+5959.9s	857	  EPOCH 15/15 — Round-Robin Training (782 steps)
+5959.9s	858	============================================================
+5960.0s	859	/kaggle/working/app.py:456: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+5960.0s	860	  with torch.cuda.amp.autocast(enabled=USE_AMP):
+5969.8s	861	   [Step 10 Stroke Debug] Pred mean: 0.0241 | GT mean: 0.0046
+6009.5s	862	  Step   50/782 | Tumor L=0.346 D=0.631 | Stroke L=0.981 D=0.332 | Alz L=0.531
+6059.5s	863	  Step  100/782 | Tumor L=0.333 D=0.664 | Stroke L=0.964 D=0.339 | Alz L=0.573
+6109.4s	864	  Step  150/782 | Tumor L=0.340 D=0.653 | Stroke L=0.932 D=0.350 | Alz L=0.555
+6159.2s	865	  Step  200/782 | Tumor L=0.338 D=0.657 | Stroke L=0.950 D=0.335 | Alz L=0.531
+6208.8s	866	  Step  250/782 | Tumor L=0.334 D=0.675 | Stroke L=0.942 D=0.333 | Alz L=0.567
+6236.5s	867	  Step  300/782 | Tumor L=0.333 D=0.677 | Stroke L=0.942 D=0.333 | Alz L=0.565
+6264.3s	868	  Step  350/782 | Tumor L=0.333 D=0.679 | Stroke L=0.942 D=0.333 | Alz L=0.561
+6278.1s	869	  Step  400/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.624
+6283.8s	870	  Step  450/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.631
+6289.5s	871	  Step  500/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.643
+6295.3s	872	  Step  550/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.649
+6301.1s	873	  Step  600/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.656
+6306.8s	874	  Step  650/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.659
+6312.5s	875	  Step  700/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.664
+6318.3s	876	  Step  750/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.644
+6322.0s	877	  Step  782/782 | Tumor L=0.331 D=0.681 | Stroke L=0.942 D=0.333 | Alz L=0.639
+6322.0s	878	
+6322.0s	879	--- Epoch 15 Summary ---
+6322.0s	880	   🧠 Tumor  | Loss: 0.3314 | ET Dice: 0.6809
+6322.0s	881	   🩸 Stroke | Loss: 0.9424 | Dice:    0.3332
+6322.0s	882	   🧬 Alz    | Loss: 0.6385
+6374.7s	883	   🛡️ Alzheimer Val AUC: 0.4572
+6374.8s	884	✅ Epoch 15 Complete.
+6379.5s	885	/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\|'
+6379.5s	886	  cells[i][c] = re.sub('\\\\\|', '|', cell)
+6379.7s	887	/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\_'
+6379.7s	888	  text = re.sub(r'_', '\_', text) # Escape underscores in display text
+6380.3s	889	/usr/local/lib/python3.12/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=["remove_papermill_header.RemovePapermillHeader"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.
+6380.3s	890	  warn(
+6380.3s	891	[NbConvertApp] Converting notebook __notebook__.ipynb to notebook
+6380.7s	892	[NbConvertApp] Writing 80100 bytes to __notebook__.ipynb
+6383.2s	893	/usr/local/lib/python3.12/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=["nbconvert.preprocessors.ExtractOutputPreprocessor"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.
+6383.2s	894	  warn(
+6383.2s	895	[NbConvertApp] Converting notebook __notebook__.ipynb to html
+6384.1s	896	[NbConvertApp] Writing 446676 bytes to __results__.html
