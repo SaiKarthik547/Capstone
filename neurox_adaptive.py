@@ -10,7 +10,6 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import numpy as np
-import numpy as np
 import nibabel as nib
 from nibabel.processing import resample_from_to
 import torch
@@ -73,7 +72,7 @@ if DETERMINISTIC_MODE:
 # Device and Model Configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
-PRESENCE_THRESHOLD = 0.5
+PRESENCE_THRESHOLD = 0.45
 # Dynamic Path Configuration
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "checkpoints" / "neurox_model.pth"
@@ -91,7 +90,7 @@ DISEASE_COLORS = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TransformerBottleneck3D(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.1):
+    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.2):
         super().__init__()
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -124,7 +123,7 @@ class SharedEncoder(nn.Module):
         self.pool2 = nn.MaxPool3d(2)
         self.enc3 = self._conv_block(64, 128)
         self.pool3 = nn.MaxPool3d(2)
-        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.1)
+        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.2)
     
     def _conv_block(self, in_c, out_c):
         """InstanceNorm3d for consistency with training pipeline (batch_size=2 stability)."""
@@ -159,7 +158,7 @@ class PresenceHead(nn.Module):
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(in_features, 64)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.2)
         self.fc2 = nn.Linear(64, 1)
     
     def forward(self, bottleneck_features):
@@ -242,33 +241,143 @@ class SegmentationDecoder(nn.Module):
         e1, e2, e3, b = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"], enc_features["bottleneck"]
         u3 = self.up3(b)
         d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        
         u2 = self.up2(d3)
         d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
         u1 = self.up1(d2)
         d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
-        return self.output_head(d1)
+        
+        main = self.output_head(d1)
+        return main
+
+
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation channel attention block."""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _, _ = x.shape
+        y = self.pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1, 1)
+        return x * y
+
+
+class ResBlock3D(nn.Module):
+    """Residual Block with InstanceNorm."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(out_ch),
+        )
+        self.skip = nn.Conv3d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv(x) + self.skip(x))
+
+
+class AlzheimerEncoder(nn.Module):
+    """AlzheimerEncoder v2: Deep Residual + SE Attention.
+    
+    Structure:
+        1 -> 32 (ResBlock) -> Pool
+        32 -> 64 (ResBlock) -> Pool
+        64 -> 128 (ResBlock) -> Pool
+        128 -> 256 (ResBlock) -> SE Attention
+        
+    Global Modeling: 12x12x12 features with channel attention.
+    Classifier: 512 in (Avg+Max concat) -> 256 -> Dropout(0.2) -> 1
+    """
+    def __init__(self):
+        super().__init__()
+        self.block1 = ResBlock3D(1, 32)
+        self.pool1 = nn.MaxPool3d(2)
+
+        self.block2 = ResBlock3D(32, 64)
+        self.pool2 = nn.MaxPool3d(2)
+
+        self.block3 = ResBlock3D(64, 128)
+        self.pool3 = nn.MaxPool3d(2)
+
+        self.block4 = ResBlock3D(128, 256)
+        self.se = SEBlock(256)
+
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.max_pool = nn.AdaptiveMaxPool3d(1)
+
+        self.norm = nn.LayerNorm(512)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, 128),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, x):
+        x = self.pool1(self.block1(x))
+        x = self.pool2(self.block2(x))
+        x = self.pool3(self.block3(x))
+        x = self.block4(x)
+        x = self.se(x)
+
+        avg = self.avg_pool(x).flatten(1)
+        mx  = self.max_pool(x).flatten(1)
+
+        feat = torch.cat([avg, mx], dim=1)
+        feat = self.norm(feat)
+
+        return self.classifier(feat)
 
 
 class NeuroXMultiDisease(nn.Module):
+    """Ferrari multitask model with selective forward.
+
+    Alzheimer uses a dedicated AlzheimerEncoder that receives raw MRI directly.
+    Zero shared features with segmentation — eliminates representation conflict
+    at the encoder level. SharedEncoder is used only for Tumor / Stroke.
+    """
     def __init__(self):
         super().__init__()
         self.encoder = SharedEncoder(in_channels=1)
+        # Tumor & Stroke presence: transformer bottleneck → PresenceHead
         self.presence_heads = nn.ModuleDict({
-            "tumor": PresenceHead(128),
+            "tumor":  PresenceHead(128),
             "stroke": PresenceHead(128),
-            "alzheimer": PresenceHead(128)
+            # "alzheimer" removed — uses dedicated AlzheimerEncoder
         })
         self.seg_decoders = nn.ModuleDict({
-            "tumor": SegmentationDecoder(4, "tumor"),
+            "tumor":  SegmentationDecoder(3, "tumor"),   # [ET, NCR, ED]
             "stroke": SegmentationDecoder(1, "stroke")
         })
-    
+        # === Alzheimer Dedicated Encoder ===
+        # Raw MRI → independent 3D CNN → dual pool → MLP → AD logit
+        self.alz_encoder = AlzheimerEncoder()
+
     def forward(self, x, active_presence=None, active_seg=None):
-        features = self.encoder(x)
+        features = self.encoder(x)   # enc1, enc2, enc3, bottleneck
         presence = {}
         if active_presence:
             for key in active_presence:
-                if key in self.presence_heads:
+                if key == "alzheimer":
+                    # AlzheimerEncoder receives raw MRI directly
+                    presence["alzheimer"] = self.alz_encoder(x)
+                elif key in self.presence_heads:
+                    # Tumor / Stroke: bottleneck → PresenceHead
                     presence[key] = self.presence_heads[key](features["bottleneck"])
         segmentations = {}
         if active_seg:
@@ -286,30 +395,48 @@ class NeuroXMultiDisease(nn.Module):
 def load_model(model_path: str = MODEL_PATH):
     """Load trained model with InstanceNorm compatibility.
     
-    PRODUCTION FIX: Strict=False loading for BatchNorm→InstanceNorm transition.
-    Old checkpoints may have BatchNorm keys; we load what matches and skip rest.
+    Supports two checkpoint formats:
+      - New: dict with 'model_state' + 'metrics' keys (post metrics-history update)
+      - Legacy: plain state_dict (old checkpoints load gracefully via fallback)
     """
     model = NeuroXMultiDisease().to(DEVICE)
     if os.path.exists(model_path):
         try:
-            state_dict = torch.load(model_path, map_location=DEVICE, weights_only=True)
+            # weights_only omitted — dict checkpoints contain non-tensor objects (metrics lists)
+            checkpoint = torch.load(model_path, map_location=DEVICE)
+            
+            # Detect checkpoint format and extract state_dict + metrics
+            if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+                # New format: {"model_state": ..., "metrics": ...}
+                state_dict = checkpoint["model_state"]
+                st.session_state.training_metrics = checkpoint.get("metrics", {})
+                n_epochs = len(st.session_state.training_metrics.get("epoch", []))
+                print(f"✅ New-format checkpoint. Metrics history: {n_epochs} epochs")
+            else:
+                # Legacy format: plain state_dict — no metrics available
+                state_dict = checkpoint
+                st.session_state.training_metrics = {}
+                print("⚠️ Legacy checkpoint (no metrics). Training dashboard unavailable.")
+            
             missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
             
             # Validate architecture
             assert "alzheimer" not in model.seg_decoders, "Alzheimer must not have segmentation decoder"
-            assert "alzheimer" in model.presence_heads, "Alzheimer must have presence head"
+            assert "alzheimer" not in model.presence_heads, "Alzheimer must use dedicated AlzheimerEncoder"
+            assert hasattr(model, "alz_encoder"), "AlzheimerEncoder (model.alz_encoder) missing from model"
+            assert isinstance(model.alz_encoder, AlzheimerEncoder), "model.alz_encoder must be AlzheimerEncoder"
             
             model.eval()
             
-            # Warn about mismatched keys (expected for BatchNorm→InstanceNorm)
+            # Warn about mismatched keys (expected when architecture changed from global branch to dedicated encoder)
             if missing_keys or unexpected_keys:
                 warning_msg = f"⚠️ Checkpoint partial match: {len(missing_keys)} missing, {len(unexpected_keys)} unexpected\n"
-                warning_msg += "This is expected when loading BatchNorm checkpoints into InstanceNorm model."
+                warning_msg += "Expected if loading old checkpoints (alz_pool/alz_norm/alz_classifier → alz_encoder)."
                 st.info(warning_msg)
                 print(warning_msg)
             
             print(f"✅ Model loaded: {model_path}")
-            print(f"✅ Architecture validated: Alzheimer presence-only, no segmentation")
+            print(f"✅ Architecture validated: Alzheimer dedicated encoder, no segmentation decoder")
             return model
         except Exception as e:
             st.error(f"Model loading failed: {e}")
@@ -321,78 +448,31 @@ def load_model(model_path: str = MODEL_PATH):
 
 
 def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray, Dict, np.ndarray, Tuple]:
-    """Load, normalize, and prepare NIfTI file with complete metadata preservation.
+    """Load and preprocess NIfTI file identifying with training baseline.
     
-    MEDICAL-GRADE PREPROCESSING:
-    Preserves affine matrix and voxel spacing for anatomically accurate visualization.
-    
-    Returns:
-        roi_tensor: 96³ tensor for model inference
-        original_data: Full-resolution patient MRI (original intensity)
-        roi_metadata: Coordinate space mapping information
-        affine: NIfTI affine matrix (4x4)
-        spacing: Voxel spacing in mm (dx, dy, dz)
+    Z-score -> Direct resize to 96³ -> ROI Tensor.
+    No padding, no complex remapping.
     """
     img = nib.load(file_path)
     original_data = img.get_fdata().astype(np.float32)
     original_shape = original_data.shape
     
-    # CRITICAL: Proper spacing extraction from affine matrix
+    # Extract spacer info
     affine = img.affine
-    
-    # Extract voxel spacing as magnitude of affine column vectors
-    # This handles rotations and non-axis-aligned affines correctly
     spacing_raw = np.sqrt(np.sum(affine[:3, :3]**2, axis=0))
+    spacing = tuple(spacing_raw) if not np.any(spacing_raw <= 0) else (1.0, 1.0, 1.0)
     
-    # Validate spacing (must be positive, non-zero)
-    if np.any(spacing_raw <= 0) or np.any(np.isnan(spacing_raw)):
-        print(f"⚠️ Invalid spacing from affine: {spacing_raw}, using default (1.0, 1.0, 1.0)")
-        spacing = (1.0, 1.0, 1.0)
-    else:
-        spacing = tuple(spacing_raw)
-        print(f"✅ Voxel spacing: {spacing}")
-    
-    # Handle dimensions
-    if original_data.ndim == 4:
-        if original_data.shape[-1] <= 2:
-            data = original_data[..., 0]
-        else:
-            data = original_data[..., :2].mean(axis=-1)
-    else:
-        data = original_data.copy()
-    
-    # Z-score normalization (for inference ONLY, not visualization)
+    # Preprocess
+    data = original_data.copy()
+    if data.ndim == 4:
+        data = data[..., 0] if data.shape[-1] <= 2 else data[..., :2].mean(axis=-1)
+        
     mean, std = data.mean(), data.std() + 1e-8
-    data_normalized = np.clip((data - mean) / std, -5, 5)
+    data_normalized = (data - mean) / std
     
-    # -------------------------------------------------
-    # STEP 1 — PAD TO CUBE (CENTERED)
-    # -------------------------------------------------
-    max_dim = max(original_shape)
+    volume_tensor = torch.from_numpy(data_normalized).unsqueeze(0).unsqueeze(0)
     
-    pad_d = max_dim - original_shape[0]
-    pad_h = max_dim - original_shape[1]
-    pad_w = max_dim - original_shape[2]
-    
-    # Store padding precisely as tuple of (before, after)
-    padding = (
-        (pad_d // 2, pad_d - pad_d // 2),
-        (pad_h // 2, pad_h - pad_h // 2),
-        (pad_w // 2, pad_w - pad_w // 2),
-    )
-    
-    volume_padded = np.pad(data_normalized, padding, mode='constant', constant_values=data_normalized.min())
-    padded_shape = volume_padded.shape
-    
-    # -------------------------------------------------
-    # STEP 2 — RESIZE TO MODEL INPUT (96^3)
-    # -------------------------------------------------
-    scale_factor = ROI_SIZE[0] / max_dim
-    
-    volume_tensor = torch.tensor(volume_padded, dtype=torch.float32)
-    volume_tensor = volume_tensor.unsqueeze(0).unsqueeze(0)
-    
-    # Forward: Trilinear for continuous data
+    # Direct resize to 96³ (Training baseline)
     roi_tensor = F.interpolate(
         volume_tensor,
         size=ROI_SIZE,
@@ -400,55 +480,67 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
         align_corners=False
     )
     
-    # Store ROI metadata for EXACT inverse mapping
+    # Minimal metadata for identity mapping
     roi_metadata = {
         "original_shape": tuple(original_shape) if original_data.ndim == 3 else tuple(original_shape[:3]),
-        "padded_shape": padded_shape,
-        "padding": padding,  # ( (d_pre, d_post), (h_pre, h_post), (w_pre, w_post) )
-        "scale_factor": scale_factor,
         "interpolation_mode": "trilinear"
     }
     
     return roi_tensor, original_data, roi_metadata, affine, spacing
 
 
-def compute_lesion_metrics(segmentation: np.ndarray, spacing=(1.0, 1.0, 1.0)) -> Dict:
-    """Clinical-style volumetric quantification.
+def compute_lesion_metrics(segmentation: np.ndarray, affine: np.ndarray) -> Optional[Dict]:
+    """Clinical-style spatial and volumetric quantification using affine.
     
-    PRODUCTION IMPROVEMENT: Transforms visual segmentation into quantitative metrics.
-    Essential for academic defense - shows clinical applicability.
+    CRITICAL: Corrects for axis swap between numpy (z,y,x) and nibabel (x,y,z).
     
     Args:
-        segmentation: Binary segmentation mask (3D or 4D)
-        spacing: Voxel spacing in mm (default: 1mm isotropic)
-    
+        segmentation: Binary segmentation mask (3D uint8)
+        affine: 4x4 affine matrix for world coordinate mapping
+        
     Returns:
-        Dictionary with voxel_count, volume_mm3, volume_ml, percent_brain
+        Structured dictionary or None if no lesion detected.
     """
-    # Handle multi-channel (collapse to binary)
-    if segmentation.ndim == 4:
-        binary = segmentation.max(axis=0)
-    elif segmentation.ndim == 3:
-        binary = segmentation
-    else:
-        raise ValueError(f"Invalid segmentation shape: {segmentation.shape}")
+    import nibabel as nib
     
-    voxel_count = int(binary.sum())
+    # Ensure 3D
+    if segmentation.ndim != 3:
+        if segmentation.ndim == 4:
+            segmentation = segmentation.max(axis=0)
+        else:
+            return None
+
+    # Get voxel coordinates of non-zero elements
+    coords_voxel = np.argwhere(segmentation > 0)
     
-    # Volume calculations
-    voxel_volume_mm3 = np.prod(spacing)
-    volume_mm3 = float(voxel_count * voxel_volume_mm3)
-    volume_ml = volume_mm3 / 1000.0
+    if len(coords_voxel) == 0:
+        return None
+
+    # 1. Volume calculation
+    # Determinant of 3x3 rotational part gives voxel volume
+    voxel_vol = np.abs(np.linalg.det(affine[:3, :3]))
+    volume_mm3 = float(len(coords_voxel) * voxel_vol)
+
+    # 2. Centroid in World Coordinates
+    # Important: argwhere returns (z, y, x), but apply_affine expects (x, y, z)
+    centroid_voxel_zyx = coords_voxel.mean(axis=0)
+    centroid_voxel_xyz = centroid_voxel_zyx[[2, 1, 0]]
+    centroid_world = nib.affines.apply_affine(affine, centroid_voxel_xyz)
+
+    # 3. Bounding Box in World Coordinates
+    min_voxel_zyx = coords_voxel.min(axis=0)
+    max_voxel_zyx = coords_voxel.max(axis=0)
     
-    # Approximate brain volume (1400 mL average adult brain)
-    brain_volume_estimate = 1400.0
-    percent_brain = (volume_ml / brain_volume_estimate) * 100.0
-    
+    # Swap to XYZ before applying affine
+    min_world = nib.affines.apply_affine(affine, min_voxel_zyx[[2, 1, 0]])
+    max_world = nib.affines.apply_affine(affine, max_voxel_zyx[[2, 1, 0]])
+
     return {
-        "voxel_count": voxel_count,
         "volume_mm3": volume_mm3,
-        "volume_ml": volume_ml,
-        "percent_brain": percent_brain
+        "centroid_mm": centroid_world.tolist(),
+        "bbox_min_mm": min_world.tolist(),
+        "bbox_max_mm": max_world.tolist(),
+        "voxel_count": int(len(coords_voxel))
     }
 
 
@@ -516,36 +608,64 @@ def automatic_disease_detection(
     
     CRITICAL: Uses independent sigmoid probabilities (multi-label).
     One patient can have multiple diseases simultaneously.
+
+    Alzheimer uses the dedicated AlzheimerEncoder (raw MRI → 3D CNN → dual pool → MLP)
+    instead of the shared encoder path — MC-Dropout uncertainty via Dropout(0.25) in
+    alz_encoder.classifier.
     """
     if model is None:
         return {"detected_diseases": [], "probabilities": {}, "uncertainties": {}}
     
-    diseases = ["tumor", "stroke", "alzheimer"]
     probabilities = {}
     uncertainties = {}
     presence_logits = {}
     
     with torch.no_grad():
-        features = model.encoder(image_tensor.to(DEVICE))
+        features   = model.encoder(image_tensor.to(DEVICE))
         bottleneck = features["bottleneck"]
+        # enc3 no longer needed — Alzheimer uses dedicated AlzheimerEncoder
         
-        for disease in diseases:
+        # ── Tumor & Stroke via PresenceHead (bottleneck) ──────────────────
+        for disease in ["tumor", "stroke"]:
             head = model.presence_heads[disease]
+            logit = head(bottleneck)
             
             if use_uncertainty:
-                # MC Dropout inference
                 mean_prob, uncertainty = head.uncertainty_forward(bottleneck, n_samples=10)
+                mean_prob = float(np.clip(mean_prob, 1e-6, 1.0 - 1e-6))
                 probabilities[disease] = mean_prob
                 uncertainties[disease] = uncertainty
-                # Approximate logit from probability
-                presence_logits[disease] = np.log(mean_prob / (1 - mean_prob + 1e-8))
+                presence_logits[disease] = np.log(mean_prob / (1 - mean_prob))
             else:
-                # Standard deterministic inference - extract LOGIT
-                logit = head(bottleneck)
                 presence_logits[disease] = float(logit.cpu().item())
-                prob = torch.sigmoid(logit).cpu().item()
-                probabilities[disease] = prob
+                probabilities[disease] = torch.sigmoid(logit).cpu().item()
                 uncertainties[disease] = 0.0
+        
+    # ── Alzheimer via dedicated AlzheimerEncoder (raw MRI) ───────────────
+    img_dev = image_tensor.to(DEVICE)
+    
+    if use_uncertainty:
+        # MC-Dropout: enable Dropout(0.25) inside alz_encoder.classifier
+        model.alz_encoder.classifier.train()
+        alz_samples = []
+        with torch.no_grad():
+            for _ in range(10):
+                logit = model.alz_encoder(img_dev)
+                alz_samples.append(torch.sigmoid(logit).cpu().item())
+        model.alz_encoder.classifier.eval()
+
+        mean_prob    = float(np.mean(alz_samples))
+        mean_prob    = float(np.clip(mean_prob, 1e-6, 1.0 - 1e-6))
+        uncertainty  = float(np.std(alz_samples))
+        probabilities["alzheimer"]   = mean_prob
+        uncertainties["alzheimer"]   = uncertainty
+        presence_logits["alzheimer"] = float(np.log(mean_prob / (1 - mean_prob)))
+    else:
+        with torch.no_grad():
+            logit = model.alz_encoder(img_dev)
+        presence_logits["alzheimer"] = float(logit.cpu().item())
+        probabilities["alzheimer"]   = torch.sigmoid(logit).cpu().item()
+        uncertainties["alzheimer"]   = 0.0
     
     # Apply multi-label detection (independent sigmoid)
     detection_result = apply_multi_label_detection(presence_logits, threshold)
@@ -560,31 +680,17 @@ def automatic_disease_detection(
 
 
 def perform_segmentation(model, image_tensor: torch.Tensor, diseases: List[str]) -> Dict:
-    """Segment detected diseases (tumor/stroke only).
-    
-    PRODUCTION FIX: Hard guard against Alzheimer segmentation.
-    Alzheimer is presence-only - no voxel-level pathology exists in training data.
-    """
+    """Segment detected diseases based on training baseline (raw thresholding)."""
     if model is None:
         return {}
     
-    # CRITICAL GUARD: Alzheimer cannot have segmentation
-    assert "alzheimer" not in model.seg_decoders, \
-        "ARCHITECTURAL CONSTRAINT VIOLATED: Alzheimer has no segmentation decoder"
-    
     # Filter to only segmentable diseases
     seg_diseases = [d for d in diseases if d in ["tumor", "stroke"]]
-    
-    # Inform user if Alzheimer was requested
-    if "alzheimer" in diseases:
-        st.info("ℹ️ **Alzheimer Methodology**: Presence detected via global pattern recognition. "
-                "No voxel-level segmentation available (ADNI dataset provides subject-level labels only).")
     
     if not seg_diseases:
         return {}
     
     results = {}
-    
     with torch.no_grad():
         output = model(image_tensor.to(DEVICE), active_presence=None, active_seg=seg_diseases)
         
@@ -592,18 +698,8 @@ def perform_segmentation(model, image_tensor: torch.Tensor, diseases: List[str])
             seg_logits = output["segmentations"][disease]
             seg_probs = torch.sigmoid(seg_logits).cpu().numpy()[0]
             
-            # Post-process: morphological operations
+            # Post-process: Simple thresholding (No morphology as per training)
             seg_binary = (seg_probs > 0.5).astype(np.uint8)
-            
-            for c in range(seg_binary.shape[0]):
-                seg_binary[c] = binary_closing(seg_binary[c], iterations=2)
-                seg_binary[c] = binary_fill_holes(seg_binary[c])
-                labeled, num = scipy_label(seg_binary[c])
-                if num > 0:
-                    sizes = [(labeled == i).sum() for i in range(1, num + 1)]
-                    if sizes:
-                        largest = np.argmax(sizes) + 1
-                        seg_binary[c] = (labeled == largest).astype(np.uint8)
             
             results[disease] = seg_probs, seg_binary
     
@@ -627,80 +723,29 @@ def map_segmentation_to_original_space(
     roi_metadata: Dict
 ) -> np.ndarray:
     """
-    Inverse transform:
-    1. Upsample 96^3 -> padded cube (Nearest Neighbor)
-    2. Remove padding -> original shape (Exact Crop)
+    Surgical Inverse transform (Matched to new simple preprocessing):
+    Directly resize 96³ -> original shape using nearest neighbor.
     """
-    print(f"\n🔄 Mapping segmentation to original space...")
-    print(f"   Input shape: {seg_roi.shape}, dtype: {seg_roi.dtype}")
+    # 1. Resize back to original shape directly
+    target_shape = roi_metadata["original_shape"]
     
-    # Handle multi-channel (tumor has 4 channels)
-    if seg_roi.ndim == 4:
-        seg_roi = seg_roi.max(axis=0)  # Collapse to single channel
-    elif seg_roi.ndim == 3 and seg_roi.shape[0] <= 4:
-        seg_roi = seg_roi.max(axis=0)
-
-    # Validate metadata
-    if "padded_shape" not in roi_metadata:
-        print("⚠️ Legacy metadata detected - using fallback upsampling")
-        # Legacy fallback (blind upsampling)
-        target_shape = roi_metadata["original_shape"]
-        seg_tensor = torch.from_numpy(seg_roi.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-        seg_upsampled = F.interpolate(seg_tensor, size=target_shape, mode='nearest')
-        return (seg_upsampled.squeeze().cpu().numpy() > 0.5).astype(np.uint8)
-
-    padded_shape = roi_metadata["padded_shape"]
-    padding = roi_metadata.get("padding", roi_metadata.get("pad_width"))  # handle both keys
-    original_shape = roi_metadata["original_shape"]
-
-    # -------------------------------------------------
-    # STEP 1 — INVERSE RESIZE (Nearest Neighbor)
-    # -------------------------------------------------
-    seg_tensor = torch.tensor(seg_roi, dtype=torch.float32)
-    # Ensure 5D tensor [B, C, D, H, W]
-    while seg_tensor.ndim < 5:
-        seg_tensor = seg_tensor.unsqueeze(0)
-
-    # Inverse: Nearest Neighbor for masks (CRITICAL)
-    seg_up = F.interpolate(
+    # Torch interpolate expects 5D (B, C, D, H, W)
+    seg_tensor = torch.from_numpy(seg_roi).float()
+    if seg_tensor.ndim == 3:
+        seg_tensor = seg_tensor.unsqueeze(0).unsqueeze(0)
+    else:
+        seg_tensor = seg_tensor.unsqueeze(0) # Already has channel dim
+        
+    seg_resampled = F.interpolate(
         seg_tensor,
-        size=padded_shape,
-        mode="nearest"
-    )
-
-    seg_cube = seg_up.squeeze().cpu().numpy()
-
-    # -------------------------------------------------
-    # STEP 2 — REMOVE PADDING (EXACT INVERSE)
-    # -------------------------------------------------
-    d0, d1 = padding[0]
-    h0, h1 = padding[1]
-    w0, w1 = padding[2]
-
-    # Calculate end indices
-    d_end = padded_shape[0] - d1
-    h_end = padded_shape[1] - h1
-    w_end = padded_shape[2] - w1
-
-    seg_original = seg_cube[
-        d0:d_end,
-        h0:h_end,
-        w0:w_end
-    ]
-
-    # Threshold if needed
-    seg_original = (seg_original > 0.5).astype(np.uint8)
+        size=target_shape,
+        mode='nearest'
+    ).squeeze(0)
     
-    print(f"   Original shape (target): {original_shape}")
-    print(f"   Recovered shape: {seg_original.shape}")
-    
-    # Safety check
-    if seg_original.shape != original_shape:
-         print(f"⚠️ Shape mismatch: {seg_original.shape} vs {original_shape}")
-         # Final safety crop/pad if off by 1 voxel due to odd padding
-         seg_original = resize_to_exact_shape(seg_original, original_shape)
-
-    return seg_original.astype(np.uint8)
+    if seg_roi.ndim == 3:
+        seg_resampled = seg_resampled.squeeze(0)
+        
+    return seg_resampled.cpu().numpy().astype(np.uint8)
 
 
 def validate_alignment(segmentation_mask: np.ndarray, brain_mask: np.ndarray) -> None:
@@ -829,17 +874,22 @@ def generate_patient_brain_surface(
     
     # Marching cubes at level=0.5 (standard for binary masks)
     try:
+        from skimage import measure
         verts, faces, normals, _ = measure.marching_cubes(
             brain_smooth,
             level=0.5,
+            spacing=spacing
         )
     except (ValueError, RuntimeError) as e:
         raise RuntimeError(f"Brain surface generation failed: {e}")
     
     # Apply affine transform if provided (convert to world coordinates)
     if affine is not None:
+        # CRITICAL: Marching cubes returns (z, y, x), but affine expects (x, y, z)
+        verts_xyz = verts[:, [2, 1, 0]]
+        
         # Convert voxel coordinates to world coordinates
-        verts_homogeneous = np.column_stack([verts, np.ones(len(verts))])
+        verts_homogeneous = np.column_stack([verts_xyz, np.ones(len(verts_xyz))])
         verts = (affine @ verts_homogeneous.T).T[:, :3]
     
     return verts, faces
@@ -1250,33 +1300,31 @@ def create_3d_visualization(
     spacing: Tuple[float, float, float],
     show_patient_brain: bool = True,
     clinical_decision: Optional[Dict] = None,
-    show_heatmap: bool = False
+    show_heatmap: bool = False,
+    lesion_metrics: Optional[Dict] = None
 ) -> go.Figure:
     """Medical-Grade Patient-Specific Brain Visualization.
     
     ANATOMICALLY ACCURATE SURFACE RENDERING:
     1. Generate brain mask using Otsu thresholding
-    2. Crop to brain bounding box (no padded cubes)
+    2. Crop to brain bounding box
     3. Brain surface from mask (marching cubes at level=0.5)
     4. Lesion surfaces separately (never merged with brain)
     5. Apply affine transforms (world coordinates)
     
-    CLINICAL DECISION GATING:
-    If clinical_decision provided, only renders lesion for primary disease.
-    
-    CRITICAL: Brain and lesions are SEPARATE meshes, never meshed together.
-    
     Args:
         segmentations_roi: Dict of (probs, binary) in ROI space (96³)
         roi_metadata: Coordinate mapping metadata
-        original_volume: Full-resolution patient MRI (original intensity)
+        original_volume: Full-resolution patient MRI
         affine: NIfTI affine matrix
         spacing: Voxel spacing in mm
         show_patient_brain: Whether to render patient brain surface
         clinical_decision: Optional clinical analysis with primary disease
+        show_heatmap: Whether to show probability heatmap
+        lesion_metrics: Pre-computed world-coordinate metrics
     
     Returns:
-        Plotly 3D figure with anatomically realistic rendering
+        Plotly 3D figure with world-coordinate meshes and annotations
     """
     fig = go.Figure()
     
@@ -1323,6 +1371,15 @@ def create_3d_visualization(
     brain_mask_cropped = brain_mask[brain_bbox]
     original_cropped = original_volume[brain_bbox]
     print(f"✂️  Cropped to brain-only region")
+    
+    # CRITICAL: Compute affine for the CROPPED region to support world coordinates
+    # Translation matrix for cropping offset (in voxel space)
+    # nibabel (and our corrected generation) expects XYZ order
+    z_start, y_start, x_start = brain_bbox[0].start, brain_bbox[1].start, brain_bbox[2].start
+    T = np.eye(4)
+    T[:3, 3] = [x_start, y_start, z_start] 
+    cropped_affine = affine @ T
+    print("🌍 Scene shifted to WORLD COORDINATES (mm)")
     print("=" * 60 + "\n")
     
     # LAYER 1: Patient-Specific Brain Surface (from mask, not MRI)
@@ -1332,7 +1389,7 @@ def create_3d_visualization(
                 print("🧠 Generating brain surface mesh...")
                 brain_verts, brain_faces = generate_patient_brain_surface(
                     brain_mask=brain_mask_cropped,
-                    affine=None,
+                    affine=cropped_affine,
                     spacing=spacing
                 )
                 print(f"✅ Brain mesh: {len(brain_verts):,} vertices, {len(brain_faces):,} faces")
@@ -1399,84 +1456,36 @@ def create_3d_visualization(
         print(f"\n🔬 Processing {name} lesion...")
         print(f"   ROI space: {binary_roi.shape}")
         
-        # Apply STRICT probability threshold to show only high-confidence lesions
-        # CRITICAL: Model predicts diffuse probabilities across large brain regions
-        # We need very high threshold to show only focal, confident lesions
-        PROB_THRESHOLD = 0.85  # Very strict threshold for focal lesions
+        # Use same threshold as training
+        VIS_THRESHOLD = 0.5
         
         print(f"\n📊 {name} Probability Distribution in ROI:")
         print(f"   Min: {probs_roi.min():.4f}")
         print(f"   Max: {probs_roi.max():.4f}")
-        print(f"   Mean: {probs_roi.mean():.4f}")
-        print(f"   Median: {np.median(probs_roi):.4f}")
+        print(f"   ROI sum:", (probs_roi > 0.5).sum())
         print(f"   Voxels > 0.5: {(probs_roi > 0.5).sum():,} ({(probs_roi > 0.5).sum()/probs_roi.size*100:.1f}%)")
-        print(f"   Voxels > 0.7: {(probs_roi > 0.7).sum():,} ({(probs_roi > 0.7).sum()/probs_roi.size*100:.1f}%)")
-        print(f"   Voxels > 0.85: {(probs_roi > 0.85).sum():,} ({(probs_roi > 0.85).sum()/probs_roi.size*100:.1f}%)")
-        
-        if probs_roi.max() < PROB_THRESHOLD:
-            st.info(f"ℹ️ **{name}**: Max probability {probs_roi.max():.2f} below threshold {PROB_THRESHOLD}")
-            print(f"   ⚠️ Skipped: Max prob {probs_roi.max():.2f} < {PROB_THRESHOLD}")
-            continue
         
         if disease == "tumor" and probs_roi.ndim == 4:
-            # TUMOR SPECIFIC HANDLING (BraTS 4-channel output)
-            # Channel 1: Enhancing Tumor (ET) - usually the most distinct core
-            # Channel 3: Whole Tumor (WT) - includes edema, often fuzzy/diffuse
+            # TUMOR SPECIFIC HANDLING (BraTS sync: Use Whole Tumor)
+            prob_ncr = probs_roi[0]
+            prob_et  = probs_roi[1]
+            prob_ed  = probs_roi[2]
+            # Whole Tumor (WT) = NCR/NET + ET + ED
+            prob_wt = np.maximum.reduce([prob_ncr, prob_et, prob_ed])
             
-            print(f"   Note: analyzing tumor channels for best visualization...")
+            selected_source = "Whole Tumor (BraTS Sync)"
+            print(f"   Selected: {selected_source} with threshold {VIS_THRESHOLD}")
+            st.caption(f"Visualizing: **{selected_source}** (Threshold: {VIS_THRESHOLD:.2f})")
             
-            # STRATEGY: Prefer Enhancing Tumor (Ch1) if it exists, as it's cleaner.
-            # Fallback to Whole Tumor (Ch3) only if ET is empty.
+            binary_strict = (prob_wt > VIS_THRESHOLD).astype(np.uint8)
             
-            prob_et = probs_roi[1]  # Enhancing Tumor
-            prob_wt = probs_roi[3]  # Whole Tumor
-            
-            # Check max confidence
-            max_et = prob_et.max()
-            max_wt = prob_wt.max()
-            
-            print(f"   Max Prob - ET: {max_et:.4f}, WT: {max_wt:.4f}")
-            
-            target_prob = None
-            selected_source = ""
-            
-            # 1. Try Enhancing Tumor First (High precision)
-            if max_et > 0.8:
-                target_prob = prob_et
-                PROB_THRESHOLD = 0.85
-                selected_source = "Enhancing Tumor (Core)"
-            # 2. If ET weak, check Whole Tumor
-            elif max_wt > 0.8:
-                target_prob = prob_wt
-                # WT is often diffuse (edema), so we use a very high threshold or adaptive
-                PROB_THRESHOLD = 0.90
-                selected_source = "Whole Tumor (inc. Edema)"
-                
-                # Safety: Check volume of WT at 0.9
-                vol_ratio = (prob_wt > 0.9).mean()
-                if vol_ratio > 0.15: # If >15% of brain is tumor, it's likely artifact
-                    print(f"   ⚠️ WT Volume Ratio {vol_ratio:.1%} too high -> Increasing threshold")
-                    PROB_THRESHOLD = 0.98 # Extremely strict
-            else:
-                # Both weak - likely no visible tumor or just edema
-                target_prob = prob_wt
-                PROB_THRESHOLD = 0.95
-                selected_source = "Whole Tumor (Strict)"
-
-            print(f"   Selected: {selected_source} with threshold {PROB_THRESHOLD}")
-            st.caption(f"Visualizing: **{selected_source}** (Threshold: {PROB_THRESHOLD:.2f})")
-            
-            tumor_prob = target_prob
-            binary_strict = (tumor_prob > PROB_THRESHOLD).astype(np.uint8)
-            
-        elif binary_roi.ndim == 4:  # Multi-channel logic (generic fallback)
-            # Collapse other multi-channel diseases if any
-            binary_strict = (probs_roi.max(axis=0) > PROB_THRESHOLD).astype(np.uint8)
+        elif probs_roi.ndim == 4:  # Multi-channel logic (generic fallback)
+            binary_strict = (probs_roi.max(axis=0) > VIS_THRESHOLD).astype(np.uint8)
         else:
             # Single channel (Stroke)
-            binary_strict = (probs_roi > PROB_THRESHOLD).astype(np.uint8)
+            binary_strict = (probs_roi > VIS_THRESHOLD).astype(np.uint8)
         
-        print(f"   After threshold {PROB_THRESHOLD}: {binary_strict.sum():,} voxels in ROI")
+        print(f"   After threshold {VIS_THRESHOLD}: {binary_strict.sum():,} voxels in ROI")
         
         # CRITICAL: Map from ROI space to original patient space
         seg_original = map_segmentation_to_original_space(binary_strict, roi_metadata)
@@ -1493,42 +1502,22 @@ def create_3d_visualization(
             seg_original = seg_original[brain_bbox]
             print(f"   After bbox crop: {seg_original.shape}, {seg_original.sum():,} voxels")
         
-        # Minimum volume check
-        MIN_VOLUME_VOXELS = 50  # Reasonable minimum
+        # Minimum volume check (Minimal gating for marching cubes stability)
+        MIN_VOLUME_VOXELS = 1 
         voxel_count = int(seg_original.sum())
         
         if voxel_count < MIN_VOLUME_VOXELS:
-            st.info(f"ℹ️ **{name}**: Lesion volume too small ({voxel_count} voxels)")
-            print(f"   ⚠️ Skipped: {voxel_count} < {MIN_VOLUME_VOXELS} voxels")
+            print(f"   ⚠️ Skipping empty segmentation (0 voxels)")
             continue
         
-        # Moderate cleaning to reduce size but preserve lesions
-        from skimage.morphology import binary_erosion, binary_closing, ball, remove_small_objects
-        from scipy.ndimage import binary_fill_holes
+        # ─── SYNC: DISABLE MORPHOLOGICAL CLEANING ───
+        # from skimage.morphology import binary_erosion, binary_closing, ball, remove_small_objects
+        # from scipy.ndimage import binary_fill_holes
         
-        seg_clean = seg_original.astype(bool)
-        
-        # Remove small objects first (GENTLE)
-        if seg_clean.sum() > 0:
-            seg_clean = remove_small_objects(seg_clean, min_size=20)  # Reduced from 50
-        
-        # LIGHT erosion to shrink slightly (not too aggressive)
-        seg_clean = binary_erosion(seg_clean, ball(1))  # Reduced from ball(2)
-        
-        # Keep largest component only
-        seg_clean = largest_connected_component(seg_clean)
-        
-        # Close and fill
-        seg_clean = binary_closing(seg_clean, ball(1))
-        seg_clean = binary_fill_holes(seg_clean).astype(np.uint8)
-        
+        seg_clean = seg_original.astype(np.uint8)
         cleaned_voxels = seg_clean.sum()
-        MIN_CLEAN_VOXELS = 10  # Very low threshold
-        if cleaned_voxels < MIN_CLEAN_VOXELS:
-            print(f"   ⚠️ Skipped: Post-cleaning {cleaned_voxels} < {MIN_CLEAN_VOXELS} voxels")
-            continue
         
-        print(f"   After cleaning: {cleaned_voxels:,} voxels ({100*cleaned_voxels/voxel_count:.1f}% retained)")
+        print(f"   After cleaning (disabled): {cleaned_voxels:,} voxels")
         
         # GOLD-STANDARD CLINICAL QA: Anatomical validation
         is_valid, centroid, msg = validate_lesion_position(seg_clean, brain_mask_cropped if brain_bbox else None)
@@ -1547,15 +1536,20 @@ def create_3d_visualization(
         try:
             seg_smooth = gaussian_filter(seg_clean.astype(float), sigma=sigma)
             
-            # GOLD-STANDARD: Marching cubes WITH spacing (same as brain)
+            # GOLD-STANDARD: Marching cubes in voxel space
             verts, faces, normals, _ = measure.marching_cubes(
                 seg_smooth,
-                level=0.5,  # Physical mm coordinates
+                level=0.5
             )
             
-            print(f"   Marching cubes: {len(verts):,} vertices, {len(faces):,} faces")
+            # SWAP ZYX to XYZ before applying affine
+            verts_xyz = verts[:, [2, 1, 0]]
             
-            # NO manual offset - marching cubes with spacing handles it
+            # Apply cropped affine to convert to absolute world mm
+            verts_homogeneous = np.column_stack([verts_xyz, np.ones(len(verts_xyz))])
+            verts = (cropped_affine @ verts_homogeneous.T).T[:, :3]
+            
+            print(f"   Marching cubes: {len(verts):,} vertices (converted to world space)")
             
             # Show vertex range for debugging
             print(f"   Vertex range: X=[{verts[:,0].min():.1f}, {verts[:,0].max():.1f}]")
@@ -1565,19 +1559,46 @@ def create_3d_visualization(
             # Prepare mesh coloring
             if show_heatmap:
                 # Heatmap: sample probability values at vertex locations
-                # Interpolate probability values at mesh vertices
-                from scipy.ndimage import map_coordinates
-                
-                # Verts are in mm, need to convert to voxel coords for sampling
-                verts_voxel = verts / np.array(spacing)
-                
-                # Sample probabilities at vertex locations
-                vertex_probs = map_coordinates(
-                    probs_roi[0] if probs_roi.ndim == 4 else probs_roi,
-                    verts_voxel.T,
-                    order=1,
-                    mode='nearest'
-                )
+                with st.spinner(f"Mapping {name} probabilities for heatmap..."):
+                    # 1. Map ROI probabilities back to original space (float)
+                    target_shape = roi_metadata["original_shape"]
+                    prob_tensor = torch.from_numpy(probs_roi).float()
+                    if prob_tensor.ndim == 3:
+                        prob_tensor = prob_tensor.unsqueeze(0).unsqueeze(0)
+                    else:
+                        prob_tensor = prob_tensor.unsqueeze(0)
+                        
+                    prob_original = F.interpolate(
+                        prob_tensor,
+                        size=target_shape,
+                        mode='trilinear',
+                        align_corners=False
+                    ).squeeze().cpu().numpy()
+                    
+                    # 2. Crop probability map to same brain bbox
+                    prob_cropped = prob_original[brain_bbox]
+                    
+                    # 3. Get sampling coordinates using INVERSE AFFINE for 100% sync
+                    from scipy.ndimage import map_coordinates
+                    inv_affine = np.linalg.inv(cropped_affine)
+                    
+                    # Verts are currently world coordinates (mm)
+                    # apply_affine(inv, world) -> xyz voxel coordinates
+                    verts_xyz_recon = nib.affines.apply_affine(inv_affine, verts)
+                    
+                    # 4. map_coordinates expects (z, y, x) i.e. (d, h, w)
+                    verts_zyx_recon = verts_xyz_recon[:, [2, 1, 0]]
+                    
+                    # Sample probabilities at precise mesh vertex locations
+                    vertex_probs = map_coordinates(
+                        prob_cropped,
+                        verts_zyx_recon.T,
+                        order=1,
+                        mode='nearest'
+                    )
+                    
+                    print(f"   🔥 Heatmap sampled via inverse affine from world coords")
+                    print(f"   Prob range: [{vertex_probs.min():.4f}, {vertex_probs.max():.4f}]")
                 
                 # Add heatmap mesh with probability-based coloring
                 fig.add_trace(go.Mesh3d(
@@ -1613,6 +1634,26 @@ def create_3d_visualization(
                     hoverinfo='name',
                     lighting=dict(ambient=0.7, diffuse=0.8)
                 ))
+            
+            # ─── ADD SCENE ANNOTATIONS (WORLD COORDINATES) ───
+            if lesion_metrics and disease in lesion_metrics:
+                m = lesion_metrics[disease]
+                if m:
+                    centroid = m["centroid_mm"]
+                    vol_ml = m["volume_mm3"] / 1000.0
+                    
+                    fig.add_trace(go.Scatter3d(
+                        x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
+                        mode='markers+text',
+                        marker=dict(size=8, color=color, symbol='diamond', 
+                                   line=dict(color='white', width=2)),
+                        text=[f"<b>{name}</b><br>{vol_ml:.2f} mL<br>({centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f})"],
+                        textposition="top center",
+                        textfont=dict(color='white', size=12),
+                        name=f"{name} Center",
+                        hoverinfo='text'
+                    ))
+                    print(f"   📍 Added centroid marker at world: {centroid}")
             
             print(f"   ✅ {name} mesh added to scene ({'heatmap' if show_heatmap else 'solid color'})")
             
@@ -2306,6 +2347,8 @@ def run_streamlit_app():
         st.session_state.roi_metadata = {}
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
+    if 'training_metrics' not in st.session_state:
+        st.session_state.training_metrics = {}   # populated by load_model from checkpoint
         
     # GLOBAL SETTINGS STATE (Initialize defaults)
     if 'show_atlas' not in st.session_state:
@@ -2376,7 +2419,7 @@ def run_streamlit_app():
     </div>
     """, unsafe_allow_html=True)
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
         if st.button("📁 UPLOAD", key="nav_upload", use_container_width=True):
@@ -2401,6 +2444,11 @@ def run_streamlit_app():
     with col5:
         if st.button("⚙️ SETTINGS", key="nav_settings", use_container_width=True):
             st.session_state.current_page = 'settings'
+            st.rerun()
+
+    with col6:
+        if st.button("📈 TRAINING", key="nav_train", use_container_width=True):
+            st.session_state.current_page = 'training'
             st.rerun()
     
     # REMOVED SIDEBAR: All controls now in Settings page
@@ -2451,7 +2499,10 @@ def run_streamlit_app():
                                 # Use session safe threshold
                                 thr = st.session_state.confidence_threshold
                                 detection = automatic_disease_detection(model, image_tensor, thr)
-                                detected = detection["detected_diseases"]
+                                
+                                # TEMPORARY: Bypass detection gating for segmentation validation
+                                # perform segmentation always for tumor and stroke
+                                detected_for_seg = ["tumor", "stroke"]
                                 
                                 # Store ALL components including affine/spacing
                                 st.session_state.detection_results = detection
@@ -2460,9 +2511,17 @@ def run_streamlit_app():
                                 st.session_state.affine = affine
                                 st.session_state.spacing = spacing
                                 
-                                if detected:
-                                    segmentations = perform_segmentation(model, image_tensor, detected)
-                                    st.session_state.segmentation_results = segmentations
+                                segmentations = perform_segmentation(model, image_tensor, detected_for_seg)
+                                st.session_state.segmentation_results = segmentations
+                                
+                                # CRITICAL: Calculate metrics after segmentation and store in session state
+                                lesion_metrics = {}
+                                for disease, (_, binary_roi) in segmentations.items():
+                                    # Map to original space first for correct coordinates
+                                    seg_original = map_segmentation_to_original_space(binary_roi, roi_metadata)
+                                    lesion_metrics[disease] = compute_lesion_metrics(seg_original, affine)
+                                
+                                st.session_state.lesion_metrics = lesion_metrics
                                 
                                 st.session_state.analysis_complete = True
                                 st.session_state.current_page = 'analysis'
@@ -2646,12 +2705,169 @@ def run_streamlit_app():
                                 <h4 style="color: {color}; margin: 0;">{name}</h4>
                                 <p style="color: #94A3B8; margin: 5px 0; font-size: 13px;">Confidence: {conf:.1%}</p>
                             </div>
-                            <div style="font-size: 36px;">{'🔴' if disease == 'tumor' else '🔵' if disease == 'stroke' else '🟠'}</div>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                    
+                    # Display metrics for tumor and stroke
+                    if disease in ["tumor", "stroke"] and "lesion_metrics" in st.session_state:
+                        metrics = st.session_state.lesion_metrics.get(disease, {})
+                        if metrics:
+                            vol = metrics.get("volume_mm3", 0)
+                            centroid = metrics.get("centroid_mm", [0, 0, 0])
+                            bbox_min = metrics.get("bbox_min_mm", [0, 0, 0])
+                            bbox_max = metrics.get("bbox_max_mm", [0, 0, 0])
+                            
+                            st.markdown(f"""
+                            <div style="margin-left: 20px; border-left: 2px solid {color}44; padding-left: 15px; margin-bottom: 20px;">
+                                <p style="color: #E5E7EB; font-size: 13px; margin: 5px 0;">📏 <b>Volume:</b> {vol:,.1f} mm³ ({vol/1000:,.2f} mL)</p>
+                                <p style="color: #E5E7EB; font-size: 13px; margin: 5px 0;">🎯 <b>Centroid:</b> ({centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f}) mm</p>
+                                <p style="color: #E5E7EB; font-size: 13px; margin: 5px 0;">📦 <b>Bounding Box (Min):</b> ({bbox_min[0]:.1f}, {bbox_min[1]:.1f}, {bbox_min[2]:.1f}) mm</p>
+                                <p style="color: #E5E7EB; font-size: 13px; margin: 5px 0;">📦 <b>Bounding Box (Max):</b> ({bbox_max[0]:.1f}, {bbox_max[1]:.1f}, {bbox_max[2]:.1f}) mm</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+            
+            # (Training Dashboard moved to dedicated TRAINING page)
+
         else:
             st.info("No analysis results available. Please upload and analyze a scan first.")
+    
+    elif st.session_state.current_page == 'training':
+        # ========== TRAINING DASHBOARD PAGE ==========
+        st.markdown("## 📈 Optimized 80-Epoch Curriculum Insights")
+        st.markdown("---")
+
+        tm = st.session_state.get("training_metrics", {})
+        if not tm or not tm.get("epoch"):
+            st.info("Training metrics not available in the current model. "
+                    "Ensure you are using the optimized neurox_model.pth.")
+        else:
+            epochs_done = len(tm["epoch"])
+            
+            # --- MODEL HALL OF FAME (BEST SCORES) ---
+            st.markdown("""
+            <div class="glass-card">
+                <h3 style="color: #00E5FF; margin-bottom: 20px;">🏆 Model Hall of Fame (All-Time Bests)</h3>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            best_dice_tumor = max(tm.get("tumor_mean", [0]))
+            best_et_tumor   = max(tm.get("tumor_et", [0]))
+            best_dice_stroke = max(tm.get("stroke_dice", [0]))
+            best_auc_alz    = max(tm.get("alz_auc", [0]))
+            best_f1_alz     = max(tm.get("alz_f1", [0]))
+            
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                st.markdown(f"""
+                <div class="glass-card" style="text-align: center; border-left: 4px solid #FF4444;">
+                    <p style="color: #94A3B8; margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">Best Tumor Mean Dice</p>
+                    <h2 style="color: #FF4444; margin: 10px 0; font-family: 'Orbitron';">{best_dice_tumor:.4f}</h2>
+                    <p style="color: #64748B; margin: 0; font-size: 10px;">ET Max: {best_et_tumor:.4f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with b2:
+                st.markdown(f"""
+                <div class="glass-card" style="text-align: center; border-left: 4px solid #4488FF;">
+                    <p style="color: #94A3B8; margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">Best Stroke Dice</p>
+                    <h2 style="color: #4488FF; margin: 10px 0; font-family: 'Orbitron';">{best_dice_stroke:.4f}</h2>
+                    <p style="color: #64748B; margin: 0; font-size: 10px;">Voxel-level Accuracy</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with b3:
+                st.markdown(f"""
+                <div class="glass-card" style="text-align: center; border-left: 4px solid #B67EFF;">
+                    <p style="color: #94A3B8; margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">Best Alzheimer AUC</p>
+                    <h2 style="color: #B67EFF; margin: 10px 0; font-family: 'Orbitron';">{best_auc_alz:.4f}</h2>
+                    <p style="color: #64748B; margin: 0; font-size: 10px;">Area Under Curve</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with b4:
+                st.markdown(f"""
+                <div class="glass-card" style="text-align: center; border-left: 4px solid #00FFFF;">
+                    <p style="color: #94A3B8; margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">Best Alzheimer F1</p>
+                    <h2 style="color: #00FFFF; margin: 10px 0; font-family: 'Orbitron';">{best_f1_alz:.4f}</h2>
+                    <p style="color: #64748B; margin: 0; font-size: 10px;">Harmonic Mean (P/R)</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("---")
+            
+            # --- TREND ANALYTICS ---
+            import plotly.graph_objects as go
+            def _dark_fig(title, y_title="Score"):
+                fig = go.Figure()
+                fig.update_layout(
+                    title=dict(text=title, font=dict(family='Orbitron', size=16), x=0.05),
+                    height=400,
+                    plot_bgcolor="rgba(3,7,18,0.5)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#E5E7EB", family='Inter'),
+                    xaxis=dict(title="Epoch", gridcolor="rgba(255,255,255,0.05)", range=[1, 80], zeroline=False),
+                    yaxis=dict(title=y_title, gridcolor="rgba(255,255,255,0.05)", zeroline=False),
+                    legend=dict(bgcolor="rgba(17,24,39,0.8)", bordercolor="rgba(0,229,255,0.2)", borderwidth=1),
+                    margin=dict(t=60, b=40, l=60, r=20),
+                    hovermode="x unified"
+                )
+                return fig
+
+            def _add_phases(fig):
+                # Phase 1: ALZ (1-20)
+                fig.add_vrect(x0=1, x1=20.5, fillcolor="#B67EFF", opacity=0.08, layer="below", line_width=0)
+                fig.add_annotation(x=10, y=0.95, text="PHASE 1: ALZ", showarrow=False, font=dict(color="#B67EFF", size=10, family='JetBrains Mono'))
+                # Phase 2A: WARMUP (21-25)
+                fig.add_vrect(x0=20.5, x1=25.5, fillcolor="#00E5FF", opacity=0.08, layer="below", line_width=0)
+                fig.add_annotation(x=23, y=0.95, text="PHASE 2A: WARMUP", showarrow=False, font=dict(color="#00E5FF", size=10, family='JetBrains Mono'))
+                # Phase 2B: FULL SEG (26-80)
+                fig.add_vrect(x0=25.5, x1=80, fillcolor="#00FF88", opacity=0.08, layer="below", line_width=0)
+                fig.add_annotation(x=53, y=0.95, text="PHASE 2B: FULL SEG", showarrow=False, font=dict(color="#00FF88", size=10, family='JetBrains Mono'))
+
+            ep = tm["epoch"]
+            
+            # --- ROW 1: Segmentation Detailed ---
+            st.markdown("### 🧬 Segmentation Accuracy Trends")
+            fig_tumor = _dark_fig("Tumor Multi-Channel Dice (ET/NCR/ED)")
+            _add_phases(fig_tumor)
+            fig_tumor.add_trace(go.Scatter(x=ep, y=tm.get("tumor_et", []), name="Enhancing Tumor (ET)", line=dict(color="#FF4444", width=3)))
+            fig_tumor.add_trace(go.Scatter(x=ep, y=tm.get("tumor_ncr", []), name="Necrotic Core (NCR)", line=dict(color="#FF8800", width=2, dash='dash')))
+            fig_tumor.add_trace(go.Scatter(x=ep, y=tm.get("tumor_ed", []), name="Edema (ED)", line=dict(color="#FFFF00", width=2, dash='dot')))
+            st.plotly_chart(fig_tumor, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_mean = _dark_fig("Tumor Mean vs. Stroke Dice")
+                _add_phases(fig_mean)
+                fig_mean.add_trace(go.Scatter(x=ep, y=tm.get("tumor_mean", []), name="Tumor Mean", line=dict(color="#FF4444", width=3)))
+                fig_mean.add_trace(go.Scatter(x=ep, y=tm.get("stroke_dice", []), name="Stroke Dice", line=dict(color="#4488FF", width=3)))
+                st.plotly_chart(fig_mean, use_container_width=True)
+            
+            with c2:
+                # --- ROW 2: Alzheimer Classification Trends ---
+                fig_alz = _dark_fig("Alzheimer Primary Benchmarks")
+                _add_phases(fig_alz)
+                fig_alz.add_trace(go.Scatter(x=ep, y=tm.get("alz_auc", []), name="AUC-ROC", line=dict(color="#B67EFF", width=4)))
+                fig_alz.add_trace(go.Scatter(x=ep, y=tm.get("alz_accuracy", []), name="Accuracy", line=dict(color="#FFFFFF", width=2, dash='dash')))
+                fig_alz.add_trace(go.Scatter(x=ep, y=tm.get("alz_f1", []), name="F1 Score", line=dict(color="#00FFFF", width=2)))
+                st.plotly_chart(fig_alz, use_container_width=True)
+
+            # --- ROW 3: Precision & Recall ---
+            st.markdown("### ⚖️ Detection Rigor (Alzheimer)")
+            fig_pr = _dark_fig("Precision vs. Recall Stability")
+            _add_phases(fig_pr)
+            fig_pr.add_trace(go.Scatter(x=ep, y=tm.get("alz_precision", []), name="Precision", line=dict(color="#00FF88", width=3)))
+            fig_pr.add_trace(go.Scatter(x=ep, y=tm.get("alz_recall", []), name="Recall (Sensitivity)", line=dict(color="#FF00FF", width=3)))
+            st.plotly_chart(fig_pr, use_container_width=True)
+            
+            st.markdown("""
+            <div class="glass-card" style="border-left-color: #00E5FF;">
+                <h4 style="color: #00E5FF;">💡 Advanced Curriculum Analysis</h4>
+                <p style="color: #94A3B8; font-size: 13px; line-height: 1.6;">
+                    • <b>Phase 1 (Epochs 1-20):</b> Alzheimer Pre-training. Dedicated AlzheimerEncoder establishes base features.<br>
+                    • <b>Phase 2A (Epochs 21-25):</b> Segmentation Warmup. Convolutions are trained with lower LR to stabilize spatial paths.<br>
+                    • <b>Phase 2B (Epochs 26-80):</b> Full Segmentation. Transformer bottleneck unfrozen for global multi-disease context modeling.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
     
     elif st.session_state.current_page == 'visualization':
         # ========== VISUALIZATION PAGE ==========
@@ -2695,7 +2911,8 @@ def run_streamlit_app():
                     affine=st.session_state.affine,
                     spacing=st.session_state.spacing,
                     show_patient_brain=st.session_state.show_atlas,
-                    show_heatmap=st.session_state.show_heatmap
+                    show_heatmap=st.session_state.show_heatmap,
+                    lesion_metrics=st.session_state.get("lesion_metrics")
                 )
                 
                 if len(fig_3d.data) > 0:

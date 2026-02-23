@@ -1,119 +1,69 @@
 
-
-import os, gc, sys, random
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-from collections import deque
-from sklearn.metrics import roc_auc_score
-
+import os
+import sys
+import random
 import numpy as np
 import nibabel as nib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
 from tqdm.auto import tqdm
-
-print("=" * 80)
-print("🧠 NeuroX - Multi-Disease Pathology Detection System")
-print("=" * 80)
-print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"🔥 PyTorch: {torch.__version__}")
-print(f"💻 Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
-print("📋 Diseases: Tumor | Stroke | Alzheimer")
-print("=" * 80 + "\n")
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    roc_auc_score, precision_score, recall_score, f1_score, accuracy_score,
+    roc_curve
+)
+from collections import Counter
+import pandas as pd
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION
+#  0. GLOBAL SAFETY CHECKS
+# ═══════════════════════════════════════════════════════════════════════════
+print("="*80)
+print("🔍 GLOBAL SAFETY CHECKS")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+print(f"Device: {device_name}")
+print("="*80)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  1. CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════
 
 SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
-BATCH_SIZE = 2
-NUM_WORKERS = 2
-LR = 1e-4
+BATCH_SIZE = 1
+NUM_WORKERS = 2         
 WEIGHT_DECAY = 1e-5
-USE_AMP = True
-GRADIENT_CLIP = 1.0
-VALIDATION_SPLIT = 0.1
-PRESENCE_THRESHOLD = 0.5
+EPOCHS = 80          # Optimized 80-epoch curriculum
+USE_AMP = True       # AMP enabled for memory efficiency and speed
+
+# Multi-task loss weights (Final Balanced Setting)
+LAMBDA_TUMOR  = 1.5
+LAMBDA_STROKE = 1.5
+LAMBDA_CLS    = 2.0
+
 CHECKPOINT_DIR = Path("./checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
-#Production
-# ═════════════════════════════════════════════════════════════════════════════
-# PRODUCTION-GRADE TRAINING ENHANCEMENTS
-# ═════════════════════════════════════════════════════════════════════════════
 
-# Gradient Accumulation: Simulates larger batch size without GPU memory increase
-# Effective batch = BATCH_SIZE × GRADIENT_ACCUMULATION_STEPS = 2 × 4 = 8
-GRADIENT_ACCUMULATION_STEPS = 4
+# Dynamic weights will be set in main()
+STROKE_POS_WEIGHT = None 
+ALZ_POS_WEIGHT = None
 
-# Loss Curriculum: Epochs to focus purely on presence before adding segmentation
-# Prevents early-stage segmentation dominance that can harm presence learning
-PRESENCE_WARMUP_EPOCHS = 5
+# Cache dir for resized volumes
+CACHE_DIR = Path("/kaggle/working/cache")
+CACHE_DIR.mkdir(exist_ok=True, parents=True)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ADVANCED FEATURES CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════
+# DEBUG MODE
+DEBUG = False  # Set True for quick pipeline check (20 samples, 3 epochs)
 
-# Uncertainty Estimation (Monte-Carlo Dropout)
-MC_DROPOUT_SAMPLES = 10  # Number of forward passes for uncertainty estimation
-MC_DROPOUT_RATE = 0.3  # Dropout rate for epistemic uncertainty
-
-# Adaptive Encoder Freezing
-ADAPTIVE_FREEZE_PATIENCE = 3  # Epochs to wait before unfreezing on plateau
-ADAPTIVE_FREEZE_DELTA = 0.01  # Minimum AUC improvement to avoid plateau
-
-# Multi-Scale Context Learning
-GLOBAL_CONTEXT_SIZE = (48, 48, 48)  # Downsampled global context resolution
-USE_MULTI_SCALE = True  # Enable dual-resolution learning
-
-# Curriculum Learning
-CURRICULUM_STAGE1_EPOCHS = 5  # Presence-only with frozen encoder
-CURRICULUM_STAGE2_EPOCHS = 10  # Presence + segmentation, encoder frozen
-# Stage 3: Full unfreezing for remaining epochs
-
-# Calibration-Aware Loss
-FOCAL_LOSS_GAMMA = 2.0  # Focal loss focusing parameter
-TEMPERATURE_SCALING_INIT = 1.5  # Initial temperature for calibration
-
-# Failure Detection (OOD)
-OOD_ENTROPY_WEIGHT = 0.1  # Weight for OOD head entropy loss
-
-# Explainability (Grad-CAM)
-SAVE_GRADCAM_MAPS = True  # Save attention maps during validation
-GRADCAM_OUTPUT_DIR = Path("./gradcam_outputs")
-GRADCAM_OUTPUT_DIR.mkdir(exist_ok=True)
-
-# Training Phases
-TRAINING_PHASES = [
-    {
-        "name": "Phase 1: Brain Tumor Detection",
-        "dataset_type": "tumor",
-        "dataset_path": "/kaggle/input/brats20-dataset-training-validation/",
-        "epochs": 50,
-        "freeze_encoder": False,
-        "has_segmentation": True
-    },
-    {
-        "name": "Phase 2: Ischemic Stroke Detection",
-        "dataset_type": "stroke",
-        "dataset_path": "/kaggle/input/isles-2022-brain-stoke-dataset/",
-        "epochs": 55,
-        "freeze_encoder": "partial",
-        "has_segmentation": True
-    },
-    {
-        "name": "Phase 3: Alzheimer's Presence Detection",
-        "dataset_type": "alzheimer",
-        "dataset_path": "/kaggle/input/new-3d-mri-alzheimer/",
-        "epochs": 56,
-        "freeze_encoder": True,
-        "has_segmentation": False  # CRITICAL: No segmentation for Alzheimer
-    }
-]
+if DEBUG:
+    print("🔬 DEBUG MODE ENABLED: Training restricted to 20 samples/dataset, 3 epochs.")
+    EPOCHS = 3
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -124,11 +74,288 @@ def set_seed(seed: int):
 set_seed(SEED)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MODEL ARCHITECTURE
+#  2. PREPROCESSING (UNIFIED & DETERMINISTIC)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def load_nifti(path: Path) -> np.ndarray:
+    try:
+        img = nib.load(str(path))
+        data = img.get_fdata()
+        return np.asarray(data, dtype=np.float32)
+    except Exception as e:
+        print(f"Error loading {path}: {e}")
+        return np.zeros(ROI_SIZE, dtype=np.float32)
+
+def preprocess_volume(volume: np.ndarray, is_mask: bool = False) -> torch.Tensor:
+    """Unified deterministic preprocessing."""
+    volume = volume.astype(np.float32)
+    
+    if not is_mask:
+        mean = volume.mean()
+        std = volume.std() + 1e-8
+        volume = (volume - mean) / std
+    
+    volume = torch.from_numpy(volume)
+    if volume.ndim == 3:
+        volume = volume.unsqueeze(0).unsqueeze(0)
+    elif volume.ndim == 4:
+        volume = volume.unsqueeze(0)
+        
+    volume = F.interpolate(
+        volume,
+        size=ROI_SIZE,
+        mode="nearest" if is_mask else "trilinear",
+        align_corners=None if is_mask else False
+    )
+    
+    return volume.squeeze(0)  # [C=1, D, H, W]
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  3. DATASETS
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TumorDataset(Dataset):
+    """BraTS 2020: T1ce Input -> [ET, NCR, ED] Independent Binary Masks
+    
+    Using mutually exclusive labels on ROI:
+    - ET  = Enhancing Tumor (label 4)
+    - NCR = Necrotic Core (label 1)
+    - ED  = Edema (label 2)
+    """
+    def __init__(self, root_path: str, debug=False):
+        self.root = Path(root_path)
+        self.cases = self._find_cases()
+        if debug:
+            self.cases = self.cases[:20]
+            print(f"⚠️ DEBUG: Tumor dataset restricted to {len(self.cases)} cases")
+        print(f"✅ Tumor Dataset: {len(self.cases)} cases")
+
+    def _find_cases(self):
+        cases = []
+        for case_dir in self.root.rglob("BraTS20_Training_*"):
+            if not case_dir.is_dir(): continue
+            t1ce = list(case_dir.glob("*_t1ce.nii*"))
+            seg = list(case_dir.glob("*_seg.nii*"))
+            if t1ce and seg:
+                cases.append({"t1ce": t1ce[0], "seg": seg[0]})
+        return cases
+    
+    def __len__(self): return len(self.cases)
+    
+    def __getitem__(self, idx):
+        case = self.cases[idx]
+        cache_key = CACHE_DIR / f"tumor_{idx}.npz"
+        
+        # STEP 7: Load from cache if available
+        if cache_key.exists():
+            data = np.load(cache_key)
+            image = torch.from_numpy(data["image"])
+            target = torch.from_numpy(data["target"])
+        else:
+            img = load_nifti(case["t1ce"])
+            image = preprocess_volume(img, is_mask=False)
+            
+            seg_vol = load_nifti(case["seg"])
+            seg = preprocess_volume(seg_vol, is_mask=True)
+            seg = seg.round()
+            
+            # Independent binary masks (mutually exclusive)
+            # BraTS Labels: 1=NCR/NET, 2=ED, 4=ET
+            seg_et  = (seg == 4.0).float()   
+            seg_ncr = (seg == 1.0).float()   
+            seg_ed  = (seg == 2.0).float()   
+            
+            target = torch.cat([seg_et, seg_ncr, seg_ed], dim=0)  # [3, 96, 96, 96]
+            
+            np.savez_compressed(cache_key, image=image.numpy(), target=target.numpy())
+        
+        has_tumor = 1.0 if target.sum() > 0 else 0.0
+        
+        return {
+            "image": image,
+            "seg": target,
+            "has_seg": torch.tensor([1.0]),
+            "presence": {
+                "tumor": torch.tensor([has_tumor]),
+                "stroke": torch.tensor([0.0]),
+                "alzheimer": torch.tensor([0.0])
+            }
+        }
+
+class StrokeDataset(Dataset):
+    """ISLES 2022: DWI/ADC Input -> Binary Mask Target"""
+    def __init__(self, root_path: str, debug=False):
+        self.root = Path(root_path)
+        self.cases = self._find_cases()
+        if debug:
+            self.cases = self.cases[:20]
+            print(f"⚠️ DEBUG: Stroke dataset restricted to {len(self.cases)} cases")
+        print(f"✅ Stroke Dataset: {len(self.cases)} cases")
+
+    def _find_cases(self):
+        cases = []
+        base = self.root / "ISLES-2022" / "ISLES-2022"
+        for sub_dir in base.glob("sub-strokecase*"):
+            dwi_dir = sub_dir / "ses-0001" / "dwi"
+            if not dwi_dir.exists(): continue
+            
+            # Recursive search, filter empty files
+            dwi_candidates = list(dwi_dir.rglob("*.nii*"))
+            valid_dwi = [f for f in dwi_candidates if f.is_file() and f.stat().st_size > 1024]
+            
+            if not valid_dwi:
+                continue
+
+            msk_dir = base / "derivatives" / sub_dir.name / "ses-0001"
+            if not msk_dir.exists(): continue
+            
+            msk_candidates = list(msk_dir.rglob("*.nii*"))
+            valid_msk = [f for f in msk_candidates if f.is_file() and "msk" in f.name and f.stat().st_size > 1024]
+            
+            if valid_dwi and valid_msk:
+                # Prefer ADC file
+                dwi_path = next((f for f in valid_dwi if "adc" in f.name.lower()), None)
+                if dwi_path is None:
+                    dwi_path = max(valid_dwi, key=lambda x: x.stat().st_size)
+                cases.append({"dwi": dwi_path, "msk": valid_msk[0]})
+        return cases
+
+    def __len__(self): return len(self.cases)
+
+    def __getitem__(self, idx):
+        case = self.cases[idx]
+        cache_key = CACHE_DIR / f"stroke_{idx}.npz"
+        
+        if cache_key.exists():
+            data = np.load(cache_key)
+            image = torch.from_numpy(data["image"])
+            target = torch.from_numpy(data["target"])
+        else:
+            vol_img = load_nifti(case["dwi"])
+            vol_msk = load_nifti(case["msk"])
+            
+            # Strict alignment check
+            assert vol_img.shape == vol_msk.shape, f"Stroke shape mismatch: {vol_img.shape} vs {vol_msk.shape}"
+
+            image = preprocess_volume(vol_img, is_mask=False)
+            mask = preprocess_volume(vol_msk, is_mask=True)
+            target = (mask > 0).float()
+            
+            np.savez_compressed(cache_key, image=image.numpy(), target=target.numpy())
+        
+        has_stroke = 1.0 if target.sum() > 0 else 0.0
+        
+        return {
+            "image": image,
+            "seg": target,
+            "has_seg": torch.tensor([1.0]),
+            "presence": {
+                "tumor": torch.tensor([0.0]),
+                "stroke": torch.tensor([has_stroke]),
+                "alzheimer": torch.tensor([0.0])
+            }
+        }
+
+class AlzheimerDataset(Dataset):
+    def __init__(self, records, augment=False):
+        self.records = records
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        record = self.records[idx]
+        vol = load_nifti(record["path"])
+        image = preprocess_volume(vol, is_mask=False)
+
+        if self.augment:
+            if random.random() < 0.5:
+                image = torch.flip(image, [2])
+            if random.random() < 0.5:
+                image = torch.flip(image, [3])
+
+        return {
+            "image": image,
+            "seg": torch.zeros((1, *ROI_SIZE)),
+            "has_seg": torch.tensor([0.0]),
+            "presence": {
+                "tumor": torch.tensor([0.0]),
+                "stroke": torch.tensor([0.0]),
+                "alzheimer": torch.tensor([float(record["label"])])
+            }
+        }
+
+def build_alzheimer_subject_split(data_root, seed=42, debug=False):
+    """
+    Build AD vs CN dataset from ADNI-style folder structure.
+    Performs SUBJECT-LEVEL stratified split.
+    """
+
+    CN_ROOT = Path(data_root) / "ecc" / "ADNI"
+    AD_ROOT = Path(data_root) / "abb" / "ADNI"
+
+    samples = []
+
+    def collect(root, label):
+        if not root.exists():
+            print(f"⚠️ Warning: Alzheimer root {root} does not exist!")
+            return
+        for subject in os.listdir(root):
+            subject_path = root / subject
+            if not subject_path.is_dir():
+                continue
+            for path, _, files in os.walk(subject_path):
+                for f in files:
+                    # Scan for both .nii and .nii.gz for robustness
+                    if f.endswith(".nii") or f.endswith(".nii.gz"):
+                        samples.append({
+                            "subject": subject,
+                            "path": str(Path(path) / f),
+                            "label": label
+                        })
+
+    collect(CN_ROOT, 0)
+    collect(AD_ROOT, 1)
+
+    if not samples:
+        print("❌ CRITICAL: No Alzheimer samples found! Check data_root paths.")
+        return [], []
+
+    df = pd.DataFrame(samples)
+
+    if debug:
+        # Reduce dataset for debug while keeping class balance approx
+        df = df.sample(n=min(200, len(df)), random_state=seed)
+
+    # Subject-level grouping for stratification
+    subject_df = df.groupby("subject")["label"].first().reset_index()
+
+    train_subj, val_subj = train_test_split(
+        subject_df,
+        test_size=0.2,
+        stratify=subject_df["label"],
+        random_state=seed
+    )
+
+    train_df = df[df["subject"].isin(train_subj["subject"])]
+    val_df   = df[df["subject"].isin(val_subj["subject"])]
+
+    print("✅ Alzheimer Subject-Level Split:")
+    print("   Train subjects:", len(train_subj))
+    print("   Val subjects:", len(val_subj))
+    print("   Train scans:", len(train_df))
+    print("   Val scans:", len(val_df))
+
+    return train_df.to_dict("records"), val_df.to_dict("records")
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  4. MODEL ARCHITECTURE
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TransformerBottleneck3D(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.1):
+    """Transformer bottleneck. depth=4, heads=8, mlp_dim=256, dropout=0.2"""
+    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.2):
         super().__init__()
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -153,12 +380,6 @@ class TransformerBottleneck3D(nn.Module):
 
 
 class SharedEncoder(nn.Module):
-    """Shared encoder - accepts 1 channel, internally expands if needed.
-    
-    PRODUCTION IMPROVEMENT: Uses InstanceNorm3d instead of BatchNorm3d.
-    Rationale: With batch_size=2, BatchNorm statistics are unstable.
-    InstanceNorm is standard for medical imaging and normalizes per-sample.
-    """
     def __init__(self, in_channels=1):
         super().__init__()
         self.enc1 = self._conv_block(in_channels, 32)
@@ -167,10 +388,11 @@ class SharedEncoder(nn.Module):
         self.pool2 = nn.MaxPool3d(2)
         self.enc3 = self._conv_block(64, 128)
         self.pool3 = nn.MaxPool3d(2)
-        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.1)
+        # 3D Transformer bottleneck
+        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.2)
     
     def _conv_block(self, in_c, out_c):
-        """InstanceNorm3d for small-batch stability (affine=True preserves learnable params)."""
+        """InstanceNorm3d for batch_size=1 stability."""
         return nn.Sequential(
             nn.Conv3d(in_c, out_c, 3, padding=1),
             nn.InstanceNorm3d(out_c, affine=True),
@@ -181,62 +403,25 @@ class SharedEncoder(nn.Module):
         )
     
     def forward(self, x):
-        # Handle variable input channels (tumor/stroke use 2, Alzheimer uses 1)
+        # Handle 2-channel input gracefully (safety)
         if x.shape[1] == 2:
-            # Average pool to 1 channel for encoder
             x = x.mean(dim=1, keepdim=True)
-        
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         e3 = self.enc3(self.pool2(e2))
         b = self.bottleneck(self.pool3(e3))
         return {"enc1": e1, "enc2": e2, "enc3": e3, "bottleneck": b}
-    
-    def freeze_layers(self, mode):
-        if mode == False:
-            for param in self.parameters():
-                param.requires_grad = True
-        elif mode == "partial":
-            for param in self.enc1.parameters():
-                param.requires_grad = False
-            for param in self.enc2.parameters():
-                param.requires_grad = False
-        elif mode == True:
-            for param in self.parameters():
-                param.requires_grad = False
-
-
-class MCDropout(nn.Module):
-    """Monte-Carlo Dropout - remains active during inference for uncertainty estimation.
-    
-    Scientific Rationale:
-    Dropout at inference time approximates Bayesian inference in deep networks,
-    providing epistemic uncertainty estimates critical for medical decision support.
-    Reference: Gal & Ghahramani (2016) - Dropout as a Bayesian Approximation
-    """
-    def __init__(self, p=0.3):
-        super().__init__()
-        self.p = p
-    
-    def forward(self, x):
-        # CRITICAL: Force training=True for MC sampling even during eval
-        return F.dropout(x, p=self.p, training=True)
 
 
 class PresenceHead(nn.Module):
-    """Binary presence detector with epistemic uncertainty estimation.
-    
-    Scientific Rationale:
-    Medical models must communicate confidence. Low uncertainty on correct predictions
-    indicates reliable expertise; high uncertainty flags cases needing expert review.
-    """
+    """Binary presence detector with MC Dropout uncertainty."""
     def __init__(self, in_features=128):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool3d(1)
         self.flatten = nn.Flatten()
         self.fc1 = nn.Linear(in_features, 64)
         self.relu = nn.ReLU()
-        self.mc_dropout = MCDropout(MC_DROPOUT_RATE)  # MC Dropout for uncertainty
+        self.dropout = nn.Dropout(0.2)
         self.fc2 = nn.Linear(64, 1)
     
     def forward(self, bottleneck_features):
@@ -244,30 +429,13 @@ class PresenceHead(nn.Module):
         x = self.flatten(x)
         x = self.fc1(x)
         x = self.relu(x)
-        x = self.mc_dropout(x)  # Active even during eval
+        x = self.dropout(x)
         x = self.fc2(x)
         return x
-    
-    def uncertainty_forward(self, bottleneck_features, n_samples=MC_DROPOUT_SAMPLES):
-        """Perform N stochastic forward passes for epistemic uncertainty.
-        
-        Returns:
-            mean_prob: Mean prediction across samples
-            uncertainty: Variance across samples (epistemic uncertainty)
-        """
-        predictions = []
-        for _ in range(n_samples):
-            logit = self.forward(bottleneck_features)
-            prob = torch.sigmoid(logit)
-            predictions.append(prob)
-        
-        predictions = torch.stack(predictions, dim=0)  # [N, B, 1]
-        mean_prob = predictions.mean(dim=0)
-        uncertainty = predictions.var(dim=0)  # Epistemic uncertainty
-        return mean_prob, uncertainty
 
 
 class AttentionGate3D(nn.Module):
+    """Spatial attention gate: suppresses irrelevant skip features."""
     def __init__(self, gate_ch, skip_ch, inter_ch):
         super().__init__()
         self.W_gate = nn.Conv3d(gate_ch, inter_ch, 1)
@@ -277,11 +445,20 @@ class AttentionGate3D(nn.Module):
         self.sigmoid = nn.Sigmoid()
     
     def forward(self, gate, skip):
+        # Spatial shapes: gate and skip must match after W projections
         psi = self.relu(self.W_gate(gate) + self.W_skip(skip))
         return skip * self.sigmoid(self.psi(psi))
 
 
 class SegmentationDecoder(nn.Module):
+    """UNet decoder with 3 attention gates.
+    
+    Spatial flow (ROI=96):
+      Bottleneck: 12^3  -> up3 -> 24^3 (att3 on enc3=24^3)
+      24^3         -> up2 -> 48^3 (att2 on enc2=48^3)
+      48^3         -> up1 -> 96^3 (att1 on enc1=96^3)
+    No stride mismatch.
+    """
     def __init__(self, output_channels, name):
         super().__init__()
         self.name = name
@@ -297,13 +474,13 @@ class SegmentationDecoder(nn.Module):
         self.output_head = nn.Conv3d(32, output_channels, 1)
     
     def _conv_block(self, in_c, out_c):
-        """InstanceNorm3d (matches encoder normalization strategy)."""
+        """InstanceNorm3d (matches encoder normalization)."""
         return nn.Sequential(
             nn.Conv3d(in_c, out_c, 3, padding=1),
             nn.InstanceNorm3d(out_c, affine=True),
             nn.ReLU(inplace=True),
             nn.Conv3d(out_c, out_c, 3, padding=1),
-             nn.InstanceNorm3d(out_c, affine=True),
+            nn.InstanceNorm3d(out_c, affine=True),
             nn.ReLU(inplace=True),
         )
     
@@ -311,987 +488,681 @@ class SegmentationDecoder(nn.Module):
         e1, e2, e3, b = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"], enc_features["bottleneck"]
         u3 = self.up3(b)
         d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        
         u2 = self.up2(d3)
         d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
         u1 = self.up1(d2)
         d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
-        return self.output_head(d1)
-
-
-class MultiScaleContextFusion(nn.Module):
-    """Fuses high-resolution ROI features with downsampled global context.
-    
-    Scientific Rationale:
-    Medical diagnosis requires both local pathology detail and global anatomical context.
-    Multi-scale fusion allows the model to learn spatial relationships between pathologies
-    and anatomical landmarks (e.g., ventricles, cortex).
-    Reference: Chen et al. (2018) - Encoder-Decoder with Atrous Separable Convolution
-    """
-    def __init__(self, bottleneck_dim=128):
-        super().__init__()
-        # Process global context path
-        self.global_proc = nn.Sequential(
-            nn.Conv3d(bottleneck_dim, bottleneck_dim, 1),
-            nn.InstanceNorm3d(bottleneck_dim, affine=True),  # Consistent normalization
-            nn.ReLU(inplace=True)
-        )
-        # Learnable fusion weights
-        self.fusion_weight = nn.Parameter(torch.tensor([0.7, 0.3]))  # [local, global]
-    
-    def forward(self, local_features, global_features):
-        """
-        local_features: High-res bottleneck [B, C, D, H, W]
-        global_features: Low-res bottleneck [B, C, D/2, H/2, W/2]
-        """
-        # Upsample global to match local resolution
-        global_upsampled = F.interpolate(
-            global_features, 
-            size=local_features.shape[2:], 
-            mode='trilinear', 
-            align_corners=False
-        )
-        global_upsampled = self.global_proc(global_upsampled)
         
-        # Weighted fusion with normalized weights
-        weights = F.softmax(self.fusion_weight, dim=0)
-        fused = weights[0] * local_features + weights[1] * global_upsampled
-        return fused
+        main = self.output_head(d1)
+        return main
 
-
-class OODConfidenceHead(nn.Module):
-    """Out-of-Distribution detection head using entropy maximization.
-    
-    Scientific Rationale:
-    Clinical deployment requires models to flag OOD samples (artifacts, rare pathologies).
-    High entropy predictions indicate distributional shift, triggering expert review.
-    Reference: Hendrycks & Gimpel (2017) - A Baseline for Detecting Misclassified and OOD Examples
-    """
-    def __init__(self, in_features=128):
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation channel attention block."""
+    def __init__(self, channels, reduction=16):
         super().__init__()
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool3d(1),
-            nn.Flatten(),
-            nn.Linear(in_features, 32),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 1),  # Single OOD confidence score
-            nn.Sigmoid()  # Output: 0 = in-distribution, 1 = OOD
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
         )
-    
-    def forward(self, bottleneck_features):
-        return self.head(bottleneck_features)
+
+    def forward(self, x):
+        b, c, _, _, _ = x.shape
+        y = self.pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1, 1)
+        return x * y
 
 
-class GradCAMHook:
-    """Gradient-weighted Class Activation Mapping for explainability.
+class ResBlock3D(nn.Module):
+    """Residual Block with InstanceNorm."""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(out_ch),
+        )
+        self.skip = nn.Conv3d(in_ch, out_ch, 1, bias=False) if in_ch != out_ch else nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv(x) + self.skip(x))
+
+
+class AlzheimerEncoder(nn.Module):
+    """AlzheimerEncoder v2: Deep Residual + SE Attention.
     
-    Scientific Rationale:
-    Clinicians need voxel-level explanations to trust model predictions. Grad-CAM visualizes
-    which brain regions influenced the presence decision, enabling pathology localization
-    even without segmentation labels (critical for Alzheimer).
-    Reference: Selvaraju et al. (2017) - Grad-CAM: Visual Explanations from Deep Networks
+    Structure:
+        1 -> 32 (ResBlock) -> Pool
+        32 -> 64 (ResBlock) -> Pool
+        64 -> 128 (ResBlock) -> Pool
+        128 -> 256 (ResBlock) -> SE Attention
+        
+    Global Modeling: 12x12x12 features with channel attention.
+    Classifier: 512 in (Avg+Max concat) -> 256 -> Dropout(0.2) -> 1
     """
     def __init__(self):
-        self.gradients = None
-        self.activations = None
-    
-    def save_gradient(self, grad):
-        self.gradients = grad
-    
-    def save_activation(self, module, input, output):
-        self.activations = output.detach()
-    
-    def generate_cam(self, target_layer):
-        """Generate class activation map from stored gradients and activations."""
-        if self.gradients is None or self.activations is None:
-            return None
-        
-        # Global average pooling of gradients
-        weights = self.gradients.mean(dim=(2, 3, 4), keepdim=True)  # [B, C, 1, 1, 1]
-        
-        # Weighted combination of activation maps
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)  # [B, 1, D, H, W]
-        cam = F.relu(cam)  # Only positive contributions
-        
-        # Normalize to [0, 1]
-        cam_min = cam.view(cam.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1, 1)
-        cam_max = cam.view(cam.size(0), -1).max(dim=1)[0].view(-1, 1, 1, 1, 1)
-        cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
-        
-        return cam
+        super().__init__()
+        self.block1 = ResBlock3D(1, 32)
+        self.pool1 = nn.MaxPool3d(2)
+
+        self.block2 = ResBlock3D(32, 64)
+        self.pool2 = nn.MaxPool3d(2)
+
+        self.block3 = ResBlock3D(64, 128)
+        self.pool3 = nn.MaxPool3d(2)
+
+        self.block4 = ResBlock3D(128, 256)
+        self.se = SEBlock(256)
+
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.max_pool = nn.AdaptiveMaxPool3d(1)
+
+        self.norm = nn.LayerNorm(512)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, 128),
+            nn.GELU(),
+            nn.Dropout(0.2), 
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, x):
+        x = self.pool1(self.block1(x))
+        x = self.pool2(self.block2(x))
+        x = self.pool3(self.block3(x))
+        x = self.block4(x)
+        x = self.se(x)
+
+        avg = self.avg_pool(x).flatten(1)
+        mx  = self.max_pool(x).flatten(1)
+
+        feat = torch.cat([avg, mx], dim=1)
+        feat = self.norm(feat)
+
+        return self.classifier(feat)
 
 
 class NeuroXMultiDisease(nn.Module):
-    """Multi-disease pathology detection model with advanced research features.
-    
-    New Capabilities:
-    - Uncertainty-aware predictions (MC Dropout)
-    - Multi-scale context learning
-    - OOD failure detection
-    - Grad-CAM explainability
-    - Temperature-scaled calibration
+    """Multitask model with selective forward.
+
+    Selective forward: only activate heads needed per batch.
+    Alzheimer uses a dedicated AlzheimerEncoder that receives raw MRI directly.
+    SharedEncoder is used only for Tumor / Stroke.
     """
     def __init__(self):
         super().__init__()
         self.encoder = SharedEncoder(in_channels=1)
-        
-        # Multi-scale context fusion (NEW)
-        if USE_MULTI_SCALE:
-            self.context_fusion = MultiScaleContextFusion(bottleneck_dim=128)
-        
-        # Three presence heads (NOW with MC Dropout)
+        # Tumor & Stroke presence: transformer bottleneck -> PresenceHead
         self.presence_heads = nn.ModuleDict({
-            "tumor": PresenceHead(128),
+            "tumor":  PresenceHead(128),
             "stroke": PresenceHead(128),
-            "alzheimer": PresenceHead(128)
+            # "alzheimer" removed — uses dedicated AlzheimerEncoder
         })
-        
-        # TWO segmentation decoders (NO Alzheimer decoder)
         self.seg_decoders = nn.ModuleDict({
-            "tumor": SegmentationDecoder(4, "tumor"),
+            "tumor":  SegmentationDecoder(3, "tumor"),   # [ET, NCR, ED]
             "stroke": SegmentationDecoder(1, "stroke")
-            # CRITICAL: NO Alzheimer decoder
         })
-        
-        # OOD confidence head (NEW)
-        self.ood_head = OODConfidenceHead(128)
-        
-        # Temperature scaling for calibration (NEW)
-        self.temperature = nn.Parameter(torch.ones(1) * TEMPERATURE_SCALING_INIT)
-        
-        # Grad-CAM hooks (NEW) - initialized but not registered until needed
-        self.gradcam_hook = GradCAMHook()
-        self.gradcam_handle = None
-    
-    def forward(self, x, active_presence=None, active_seg=None, x_global=None, compute_ood=False):
-        """
-        Args:
-            x: High-resolution ROI input [B, C, D, H, W]
-            x_global: Optional low-resolution global context [B, C, D/2, H/2, W/2]
-            compute_ood: Whether to compute OOD confidence score
-        """
-        # Encode local (high-res) features
-        features = self.encoder(x)
-        bottleneck = features["bottleneck"]
-        
-        # Multi-scale fusion if global context provided
-        if USE_MULTI_SCALE and x_global is not None:
-            global_features = self.encoder(x_global)
-            bottleneck = self.context_fusion(bottleneck, global_features["bottleneck"])
-            features["bottleneck"] = bottleneck  # Update for downstream use
-        
-        # Presence detection with temperature-scaled calibration
+        # === Alzheimer Dedicated Encoder ===
+        # Raw MRI -> independent 3D CNN -> dual pool -> MLP -> AD logit
+        # No shared features with SharedEncoder.
+        self.alz_encoder = AlzheimerEncoder()
+
+    def forward(self, x, active_presence=None, active_seg=None):
+        features = self.encoder(x)   # enc1, enc2, enc3, bottleneck
         presence = {}
         if active_presence:
             for key in active_presence:
-                if key in self.presence_heads:
-                    logit = self.presence_heads[key](bottleneck)
-                    # Apply temperature scaling for calibration
-                    presence[key] = logit / self.temperature
-        
-        # Segmentation (unchanged logic)
+                if key == "alzheimer":
+                    # AlzheimerEncoder receives raw MRI directly
+                    presence["alzheimer"] = self.alz_encoder(x)
+                elif key in self.presence_heads:
+                    # Tumor / Stroke: bottleneck -> PresenceHead (unchanged)
+                    presence[key] = self.presence_heads[key](features["bottleneck"])
         segmentations = {}
         if active_seg:
             for key in active_seg:
                 if key in self.seg_decoders:
                     segmentations[key] = self.seg_decoders[key](features)
-        
-        # OOD detection (optional)
-        ood_confidence = None
-        if compute_ood:
-            ood_confidence = self.ood_head(bottleneck)
-        
-        return {
-            "presence": presence, 
-            "segmentations": segmentations,
-            "ood_confidence": ood_confidence,
-            "features": features  # For Grad-CAM access
-        }
-    
-    def enable_gradcam(self, disease="alzheimer"):
-        """Enable Grad-CAM for specified disease head.
-        
-        Scientific Rationale:
-        Alzheimer diagnosis lacks ground-truth segmentation. Grad-CAM provides
-        post-hoc localization of discriminative regions (hippocampus, ventricles).
-        """
-        # Register hook on bottleneck layer
-        target_layer = self.encoder.bottleneck
-        
-        self.gradcam_handle = target_layer.register_forward_hook(
-            self.gradcam_hook.save_activation
-        )
-    
-    def disable_gradcam(self):
-        """Remove Grad-CAM hooks."""
-        if self.gradcam_handle is not None:
-            self.gradcam_handle.remove()
-            self.gradcam_handle = None
-    
-    def get_gradcam_map(self, disease_logit):
-        """Compute Grad-CAM map for a disease presence prediction.
-        
-        Args:
-            disease_logit: Scalar logit from presence head
-        
-        Returns:
-            cam: Normalized attention map [B, 1, D, H, W]
-        """
-        # Compute gradients w.r.t. bottleneck activations
-        disease_logit.backward(retain_graph=True)
-        
-        # Generate CAM
-        return self.gradcam_hook.generate_cam(target_layer=None)
-    
-    def freeze_encoder(self, mode):
-        self.encoder.freeze_layers(mode)
-
+        return {"presence": presence, "segmentations": segmentations}
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DATASET CLASSES (THREE EXPLICIT CLASSES)
+#  5. TRAINING UTILS (LOSS & METRICS)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def zscore_normalize(vol: np.ndarray) -> np.ndarray:
-    vol = vol.astype(np.float32)
-    mean, std = vol.mean(), vol.std() + 1e-8
-    return np.clip((vol - mean) / std, -5, 5)
-
-
-def load_nifti(path: Path) -> np.ndarray:
-    try:
-        data = nib.load(str(path)).get_fdata()
-        return np.asarray(data, dtype=np.float32)
-    except:
-        return np.zeros((96, 96, 96), dtype=np.float32)
-
-
-class TumorDataset(Dataset):
-    """BraTS 2020 brain tumor dataset"""
-    def __init__(self, root_path: str):
-        self.root = Path(root_path)
-        self.cases = self._find_cases()
-        print(f"✅ Tumor Dataset: {len(self.cases)} cases")
+def compute_dice_loss(logits, targets):
+    # Channel-Wise Dice for medical imaging
+    # smooth=1.0 is standard for BraTS/ISLES to stabilize denominator at batch_size=1
+    smooth = 1.0
+    probs = torch.sigmoid(logits)
     
-    def _find_cases(self):
-        cases = []
-        skipped = 0
-        
-        if not self.root.exists():
-            print(f"⚠️ Path not found: {self.root}")
-            return cases
-        
-        # BraTS structure: root/BraTS20_Training_XXX/
-        for case_dir in self.root.rglob("BraTS20_Training_*"):
-            if not case_dir.is_dir():
-                continue
-            
-            # Look for required files
-            flair = list(case_dir.glob("*_flair.nii*"))
-            t1ce = list(case_dir.glob("*_t1ce.nii*"))
-            seg = list(case_dir.glob("*_seg.nii*"))
-            
-            if flair and t1ce and seg:
-                cases.append({
-                    "flair": flair[0],
-                    "t1ce": t1ce[0],
-                    "seg": seg[0]
-                })
+    # intersection & union per channel/batch item
+    dims = (2, 3, 4)
+    intersection = (probs * targets).sum(dim=dims)
+    union = probs.sum(dim=dims) + targets.sum(dim=dims)
+    
+    dice = (2. * intersection + smooth) / (union + smooth)
+    return 1.0 - dice.mean()
+
+def quick_dice(logits, targets):
+    """Dice Score (0-1) for logging. No gradients."""
+    probs = torch.sigmoid(logits)
+    preds = (probs > 0.5).float()
+    
+    inter = (preds * targets).sum(dim=(2, 3, 4))
+    union = preds.sum(dim=(2, 3, 4)) + targets.sum(dim=(2, 3, 4))
+    
+    dice = (2. * inter) / (union + 1e-6)
+    return dice.mean().item()
+
+def focal_loss(logits, targets, gamma=2.0, alpha=0.25):
+    """Focal loss: focuses training on hard, misclassified voxels.
+    
+    Replaces BCE in segmentation. alpha balances foreground/background.
+    gamma=2.0 conservative start — increase later if needed.
+    """
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p_t = torch.exp(-bce)
+    focal = alpha * (1 - p_t) ** gamma * bce
+    return focal.mean()
+
+def train_step(model, batch, task, optimizer, scaler, epoch, skip_backward=False):
+    """
+    Standard training step for a single task.
+    If skip_backward=True, returns the total loss tensor without performing backward or step.
+    """
+    img = batch["image"].to(DEVICE)
+    tgt = batch["seg"].to(DEVICE) if task in ["tumor", "stroke"] else None
+    
+    # ─── Forward ──────────────────────────────────────────────────────────
+    with torch.amp.autocast("cuda", enabled=USE_AMP):
+        if task == "alzheimer":
+            out = model(img, active_presence=["alzheimer"])["presence"]["alzheimer"]
+            if ALZ_POS_WEIGHT is not None:
+                loss = F.binary_cross_entropy_with_logits(out, batch["presence"]["alzheimer"].to(DEVICE), pos_weight=ALZ_POS_WEIGHT.to(DEVICE))
             else:
-                skipped += 1
+                loss = F.binary_cross_entropy_with_logits(out, batch["presence"]["alzheimer"].to(DEVICE))
+            total_loss = loss
         
-        if skipped > 0:
-            print(f"  ⚠️ Skipped {skipped} incomplete cases")
-        
-        return cases
-    
-    def __len__(self):
-        return len(self.cases)
-    
-    def __getitem__(self, idx):
-        case = self.cases[idx]
-        
-        # Load FLAIR + T1CE
-        flair = zscore_normalize(load_nifti(case["flair"]))
-        t1ce = zscore_normalize(load_nifti(case["t1ce"]))
-        image = np.stack([flair, t1ce], axis=0)
-        
-        # Load segmentation
-        seg = load_nifti(case["seg"])
-        # BraTS: 0=background, 1=NCR, 2=ED, 4=ET
-        seg_ed = (seg == 2).astype(np.float32)
-        seg_et = (seg == 4).astype(np.float32)
-        seg_ncr = (seg == 1).astype(np.float32)
-        seg_wt = ((seg == 1) | (seg == 2) | (seg == 4)).astype(np.float32)
-        seg_processed = np.stack([seg_ed, seg_et, seg_ncr, seg_wt], axis=0)
-        
-        return {
-            "image": torch.from_numpy(image).float(),
-            "seg": torch.from_numpy(seg_processed).float(),
-            "has_seg": torch.tensor([1.0], dtype=torch.float32),
-            "tumor_presence": torch.tensor([1.0], dtype=torch.float32),
-            "stroke_presence": torch.tensor([0.0], dtype=torch.float32),
-            "alzheimer_presence": torch.tensor([0.0], dtype=torch.float32)
-        }
-
-
-class StrokeDataset(Dataset):
-    """ISLES 2022 stroke dataset with nested .nii directories"""
-
-    def __init__(self, root_path: str):
-        self.root = Path(root_path)
-        self.cases = self._find_cases()
-        print(f"✅ Stroke Dataset: {len(self.cases)} cases")
-
-    def _resolve_nii(self, path: Path) -> Optional[Path]:
-        """
-        If path is a directory ending with .nii, return the actual .nii inside it.
-        """
-        if path.is_dir():
-            nii_files = list(path.glob("*.nii*"))
-            return nii_files[0] if nii_files else None
-        return path if path.is_file() else None
-
-    def _find_cases(self):
-        cases = []
-        skipped = 0
-
-        base = self.root / "ISLES-2022" / "ISLES-2022"
-
-        for sub_dir in base.glob("sub-strokecase*"):
-            dwi_root = sub_dir / "ses-0001" / "dwi"
-            if not dwi_root.exists():
-                skipped += 1
-                continue
-
-            # Find DWI + ADC (they are directories!)
-            dwi_dirs = list(dwi_root.glob("*_dwi.nii*"))
-            adc_dirs = list(dwi_root.glob("*_adc.nii*"))
-
-            dwi_file = self._resolve_nii(dwi_dirs[0]) if dwi_dirs else None
-            adc_file = self._resolve_nii(adc_dirs[0]) if adc_dirs else None
-
-            # Mask (normal file)
-            mask_dir = base / "derivatives" / sub_dir.name / "ses-0001"
-            msk_files = list(mask_dir.glob("*_msk.nii*")) if mask_dir.exists() else []
-            msk_file = msk_files[0] if msk_files else None
-
-            if dwi_file and adc_file and msk_file:
-                cases.append({
-                    "dwi": dwi_file,
-                    "adc": adc_file,
-                    "msk": msk_file
-                })
+        elif task in ["tumor", "stroke"]:
+            res = model(img, active_presence=[task], active_seg=[task])
+            pres_logits = res["presence"][task]
+            seg_logits  = res["segmentations"][task]
+            
+            # Loss A: Presence (Controlled by global LAMBDA_CLS)
+            loss_pres = F.binary_cross_entropy_with_logits(pres_logits, batch["presence"][task].to(DEVICE))
+            
+            # Loss B: Segmentation (0.8 Dice + 0.2 BCE)
+            loss_dice = compute_dice_loss(seg_logits, tgt)
+            
+            if task == "stroke":
+                # Use dynamic STROKE_POS_WEIGHT (capped at 50)
+                loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt, pos_weight=STROKE_POS_WEIGHT.to(DEVICE))
             else:
-                skipped += 1
-
-        print(f"  ⚠️ Skipped {skipped} incomplete stroke cases")
-        return cases
-
-    def __len__(self):
-        return len(self.cases)
-
-    def __getitem__(self, idx):
-        case = self.cases[idx]
-
-        dwi = zscore_normalize(load_nifti(case["dwi"]))
-        adc = zscore_normalize(load_nifti(case["adc"]))
-        image = np.stack([dwi, adc], axis=0)
-
-        msk = load_nifti(case["msk"])
-        seg = (msk > 0).astype(np.float32)[np.newaxis, ...]
-
-        return {
-            "image": torch.from_numpy(image).float(),
-            "seg": torch.from_numpy(seg).float(),
-            "has_seg": torch.tensor([1.0]),
-            "tumor_presence": torch.tensor([0.0]),
-            "stroke_presence": torch.tensor([1.0]),
-            "alzheimer_presence": torch.tensor([0.0]),
-        }
-
-
-
-class AlzheimerDataset(Dataset):
-    """ADNI-style Alzheimer dataset (presence detection ONLY)"""
-    def __init__(self, root_path: str):
-        self.root = Path(root_path)
-        self.cases = self._find_cases()
-        print(f"✅ Alzheimer Dataset: {len(self.cases)} cases (presence-only)")
-    
-    def _find_cases(self):
-        cases = []
-        skipped = 0
-        
-        if not self.root.exists():
-            print(f"⚠️ Path not found: {self.root}")
-            return cases
-        
-        # Search in MRI-AD, MRI-MCI, MRI-CN folders
-        for category in ["MRI-AD", "MRI-MCI", "MRI-CN", "MRI-AD-Part-2", "MRI-CN-Part-2"]:
-            cat_dir = self.root / category
-            if not cat_dir.exists():
-                continue
+                loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt)
+                
+            loss_seg = 0.8 * loss_dice + 0.2 * loss_bce
             
-            # Determine label: CN = 0, MCI/AD = 1
-            alzheimer_label = 0.0 if "CN" in category else 1.0
-            
-            # Find .nii files deep in structure
-            for nii_file in cat_dir.rglob("*.nii*"):
-                if nii_file.is_file():
-                    cases.append({
-                        "t1": nii_file,
-                        "alzheimer_label": alzheimer_label
-                    })
-        
-        if len(cases) == 0:
-            print(f"  ⚠️ Warning: No .nii files found")
-        
-        return cases
+            lam = LAMBDA_TUMOR if task == "tumor" else LAMBDA_STROKE
+            total_loss = lam * loss_seg + LAMBDA_CLS * loss_pres
+
+    # ─── Stability Check ──────────────────────────────────────────────────
+    if not torch.isfinite(total_loss):
+        print(f"⚠️ Non-finite loss detected in {task} at Epoch {epoch}. Skipping.")
+        return None
+
+    # Logit Quality Audit (Early Warning)
+    with torch.no_grad():
+        if task in ["tumor", "stroke"]:
+            std = seg_logits.std().item()
+            if std > 10.0:
+                print(f"⚠️ High Logit STD ({std:.2f}) in {task} at Epoch {epoch}")
+
+    # ─── Backward & Step ──────────────────────────────────────────────────
+    if skip_backward:
+        return total_loss
+
+    # Redundant zero_grad removed - handled in main loop
+    scaler.scale(total_loss).backward()
     
-    def __len__(self):
-        return len(self.cases)
+    # Gradient Clipping (1.0)
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
-    def __getitem__(self, idx):
-        case = self.cases[idx]
-        
-        # Load T1 only (single channel)
-        t1 = zscore_normalize(load_nifti(case["t1"]))
-        image = t1[np.newaxis, ...]  # [1, D, H, W]
-        
-        # NO SEGMENTATION for Alzheimer
-        
-        return {
-            "image": torch.from_numpy(image).float(),
-            "seg": None,  # Explicitly None
-            "has_seg": torch.tensor([0.0], dtype=torch.float32),  # CRITICAL: 0
-            "tumor_presence": torch.tensor([0.0], dtype=torch.float32),
-            "stroke_presence": torch.tensor([0.0], dtype=torch.float32),
-            "alzheimer_presence": torch.tensor([case["alzheimer_label"]], dtype=torch.float32)
-        }
+    scaler.step(optimizer)
+    scaler.update()
     
-    def get_class_weights(self):
-        """Compute pos_weight for imbalanced Alzheimer dataset.
-        
-        PRODUCTION FIX: Alzheimer datasets are heavily imbalanced (more CN than AD/MCI).
-        pos_weight = neg_count / pos_count handles this without oversampling.
-        Applied ONLY in Alzheimer phase training loop.
-        """
-        pos_count = sum(1 for c in self.cases if c["alzheimer_label"] == 1.0)
-        neg_count = len(self.cases) - pos_count
-        pos_weight = neg_count / max(pos_count, 1)  # Avoid divide-by-zero
-        print(f"  📊 Alzheimer class balance: CN={neg_count}, AD/MCI={pos_count}, pos_weight={pos_weight:.2f}")
-        return pos_weight
+    return total_loss.item()
 
+def evaluate_alzheimer_full(model, loader):
+    """Full Alzheimer classification metrics: AUC, Accuracy, Precision, Recall, F1.
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CALIBRATION-AWARE LOSS FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def get_loss_curriculum_weights(epoch, total_epochs, warmup_epochs=PRESENCE_WARMUP_EPOCHS):
-    """Curriculum learning: presence-first, gradually add segmentation.
-    
-    PRODUCTION FIX: Standard joint training causes gradient interference.
-    Our approach:
-    - Epochs 1-5: Pure presence learning (seg_weight=0)
-    - Epochs 6+: Smooth cosine ramp-up for segmentation
-    
-    Scientific Rationale:
-    Presence detection requires GLOBAL features, segmentation requires LOCAL features.
-    Learning them simultaneously from random initialization causes conflicting gradients.
-    Curriculum learning establishes stable presence detection first, then adds segmentation.
-    
-    Reference: Bengio et al. (2009) - Curriculum Learning
-    """
-    if epoch <= warmup_epochs:
-        # Pure presence learning phase
-        return 0.0, 1.0  # (seg_weight, presence_weight)
-    else:
-        # Cosine ramp-up for segmentation weight: 0 → 1.0 over remaining epochs
-        progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
-        seg_weight = 0.5 * (1 - np.cos(np.pi * progress))  # Smooth 0 → 1
-        presence_weight = 1.0  # Keep presence weight constant
-        return seg_weight, presence_weight
-
-
-class FocalLoss(nn.Module):
-    """Focal Loss to penalize overconfident false positives.
-    
-    Scientific Rationale:
-    Medical models often exhibit overconfidence on hard negatives (healthy tissue near lesions).
-    Focal loss downweights easy examples, forcing the model to focus on hard misclassifications.
-    Reference: Lin et al. (2017) - Focal Loss for Dense Object Detection
-    """
-    def __init__(self, gamma=FOCAL_LOSS_GAMMA, alpha=0.25):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-    
-    def forward(self, logits, targets):
-        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-        probs = torch.sigmoid(logits)
-        pt = torch.where(targets == 1, probs, 1 - probs)  # prob of true class
-        focal_weight = (1 - pt) ** self.gamma
-        alpha_weight = torch.where(targets == 1, self.alpha, 1 - self.alpha)
-        loss = alpha_weight * focal_weight * bce_loss
-        return loss.mean()
-
-
-class CalibratedConditionalLoss(nn.Module):
-    """Enhanced loss with focal loss for presence, temperature scaling support, and OOD regularization.
-    
-    Scientific Rationale:
-    - Focal loss addresses class imbalance and overconfidence
-    - Temperature scaling enables post-hoc calibration
-    - OOD entropy maximization trains the model to flag unfamiliar samples
-    """
-    def __init__(self):
-        super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
-        self.focal_loss = FocalLoss(gamma=FOCAL_LOSS_GAMMA)
-    
-    def dice_loss(self, pred, target):
-        probs = torch.sigmoid(pred)
-        inter = (probs * target).sum(dim=(2,3,4))
-        union = probs.sum(dim=(2,3,4)) + target.sum(dim=(2,3,4))
-        return 1 - ((2 * inter + 1) / (union + 1)).mean()
-    
-    def ood_entropy_loss(self, ood_confidence):
-        """Entropy maximization for OOD samples (encourages high uncertainty on OOD).
-        
-        Scientific Rationale:
-        We want the model to produce high OOD confidence (close to 1) for out-of-distribution
-        samples. During training, we occasionally maximize entropy to prevent overconfident
-        predictions on borderline cases.
-        """
-        # Entropy of Bernoulli: -p*log(p) - (1-p)*log(1-p)
-        eps = 1e-8
-        entropy = -(ood_confidence * torch.log(ood_confidence + eps) + 
-                    (1 - ood_confidence) * torch.log(1 - ood_confidence + eps))
-        return -entropy.mean()  # Negative because we want to MAXIMIZE entropy
-    
-    def forward(self, seg_pred, seg_target, presence_pred, presence_target, has_seg, 
-                ood_confidence=None):
-        """
-        CRITICAL: Only compute seg loss if has_seg == 1
-        """
-        # Presence loss with focal loss (NEW: calibration-aware)
-        presence_loss = self.focal_loss(presence_pred, presence_target)
-        
-        loss_dict = {"presence": presence_loss.item(), "seg": 0.0, "ood": 0.0}
-        
-        # Segmentation loss (conditional)
-        seg_loss = torch.tensor(0.0, device=presence_pred.device)
-        if has_seg is not None and has_seg.sum() > 0:
-            valid_idx = has_seg.squeeze() > 0.5
-            if valid_idx.any():
-                seg_dice = self.dice_loss(seg_pred[valid_idx], seg_target[valid_idx])
-                seg_bce = self.bce(seg_pred[valid_idx], seg_target[valid_idx])
-                seg_loss = seg_dice + seg_bce
-                loss_dict["seg"] = seg_loss.item()
-        
-        # OOD regularization (optional)
-        ood_loss = torch.tensor(0.0, device=presence_pred.device)
-        if ood_confidence is not None:
-            ood_loss = self.ood_entropy_loss(ood_confidence) * OOD_ENTROPY_WEIGHT
-            loss_dict["ood"] = ood_loss.item()
-        
-        # Combined loss
-        total_loss = seg_loss + 0.5 * presence_loss + ood_loss
-        loss_dict["total"] = total_loss.item()
-        
-        return total_loss, loss_dict
-
-
-def collate_fn(batch):
-    """CPU-only collate with per-sample resizing and multi-scale context support.
-    
-    Scientific Rationale:
-    Dual-resolution processing: High-res for detailed pathology + low-res for anatomical context.
-    """
-    images = []
-    images_global = []  # NEW: Global context at lower resolution
-    segs = []
-    has_seg_list = []
-    tumor_pres = []
-    stroke_pres = []
-    alzheimer_pres = []
-
-    for b in batch:
-        # High-resolution ROI
-        img = b["image"].unsqueeze(0)  # [1, C, D, H, W]
-        img = F.interpolate(
-            img,
-            size=ROI_SIZE,
-            mode="trilinear",
-            align_corners=False
-        ).squeeze(0)
-        images.append(img)
-
-        # Low-resolution global context (NEW for multi-scale)
-        if USE_MULTI_SCALE:
-            img_global = F.interpolate(
-                b["image"].unsqueeze(0),
-                size=GLOBAL_CONTEXT_SIZE,
-                mode="trilinear",
-                align_corners=False
-            ).squeeze(0)
-            images_global.append(img_global)
-
-        # Segmentation
-        if b["seg"] is not None:
-            seg = b["seg"].unsqueeze(0)
-            seg = F.interpolate(
-                seg,
-                size=ROI_SIZE,
-                mode="nearest"
-            ).squeeze(0)
-        else:
-            seg = torch.zeros((1, *ROI_SIZE), dtype=torch.float32)
-
-        segs.append(seg)
-
-        has_seg_list.append(b["has_seg"])
-        tumor_pres.append(b["tumor_presence"])
-        stroke_pres.append(b["stroke_presence"])
-        alzheimer_pres.append(b["alzheimer_presence"])
-
-    batch_dict = {
-        "image": torch.stack(images),
-        "seg": torch.stack(segs),
-        "has_seg": torch.stack(has_seg_list),
-        "tumor_presence": torch.stack(tumor_pres),
-        "stroke_presence": torch.stack(stroke_pres),
-        "alzheimer_presence": torch.stack(alzheimer_pres)
-    }
-    
-    if USE_MULTI_SCALE and images_global:
-        batch_dict["image_global"] = torch.stack(images_global)
-    
-    return batch_dict
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# VALIDATION
-# ═══════════════════════════════════════════════════════════════════════════
-
-def validate(model, val_loader, phase_config, save_gradcam=False):
-    """Validation with DETERMINISTIC inference (no Grad-CAM, no MC Dropout).
-    
-    CRITICAL FIX: Removed all Grad-CAM and MC Dropout logic.
-    - Grad-CAM: Incompatible with torch.no_grad() (cannot register hooks without gradients)
-    - MC Dropout: 10x slower, not needed for model selection during training
-    - Both belong in inference/demo (neurox_adaptive.py), not training validation
+    Uses dedicated AlzheimerEncoder — self-contained forward pass on raw MRI.
+    Correctly accesses batch["presence"]["alzheimer"] per AlzheimerDataset format.
     """
     model.eval()
-    all_dice = []
-    all_pres_true = []
-    all_pres_pred = []
-    
-    disease = phase_config["dataset_type"]
-    has_seg = phase_config["has_segmentation"]
-    
+    all_logits, all_labels = [], []
     with torch.no_grad():
-        for batch in val_loader:
-            x = batch["image"].to(DEVICE, non_blocking=True)
-            x_global = batch.get("image_global")
-            if x_global is not None:
-                x_global = x_global.to(DEVICE, non_blocking=True)
-            
-            seg_target = batch["seg"].to(DEVICE, non_blocking=True)
-            has_seg_flag = batch["has_seg"].to(DEVICE, non_blocking=True)
-            pres_target = batch[f"{disease}_presence"].to(DEVICE, non_blocking=True)
-
-            # Forward (deterministic, no OOD)
-            if has_seg:
-                output = model(x, active_presence=[disease], active_seg=[disease], 
-                             x_global=x_global, compute_ood=False)
-                seg_pred = output["segmentations"][disease]
-                
-                # Per-sample Dice
-                if has_seg_flag.sum() > 0:
-                    valid_idx = has_seg_flag.squeeze() > 0.5
-                    if valid_idx.any():
-                        probs = torch.sigmoid(seg_pred[valid_idx])
-                        targets = seg_target[valid_idx]
-                        
-                        for sample_idx in range(probs.shape[0]):
-                            sample_pred = probs[sample_idx]
-                            sample_target = targets[sample_idx]
-                            
-                            inter = (sample_pred * sample_target).sum()
-                            union = sample_pred.sum() + sample_target.sum()
-                            
-                            if union > 0:
-                                dice = (2 * inter / union).item()
-                                all_dice.append(dice)
-            else:
-                output = model(x, active_presence=[disease], active_seg=None, 
-                             x_global=x_global, compute_ood=False)
-            
-            # Deterministic presence (simple sigmoid, no MC Dropout)
-            pres_pred = output["presence"][disease]
-            pres_prob = torch.sigmoid(pres_pred)
-            
-            all_pres_true.extend(pres_target.cpu().numpy().flatten())
-            all_pres_pred.extend(pres_prob.cpu().numpy().flatten())
-    
-    avg_dice = np.mean(all_dice) if all_dice else 0.0
-    presence_auc = roc_auc_score(all_pres_true, all_pres_pred) if len(set(all_pres_true)) > 1 else 0.5
-    
+        for batch in loader:
+            img = batch["image"].to(DEVICE)
+            lbl = batch["presence"]["alzheimer"].float()  # shape [B, 1]
+            # AlzheimerEncoder is self-contained: raw MRI -> logit
+            logit = model.alz_encoder(img)                # [B, 1]
+            all_logits.append(logit.cpu())
+            all_labels.append(lbl)
     model.train()
-    return avg_dice, presence_auc, 0.0  # Return 0.0 for uncertainty (not computed)
 
+    logits  = torch.cat(all_logits).view(-1).numpy()
+    labels  = torch.cat(all_labels).view(-1).numpy()
+    probs   = 1.0 / (1.0 + np.exp(-logits))
+
+    logit_mean = float(logits.mean())
+    logit_std  = float(logits.std())
+    tqdm.write(
+        f"   📊 Logit Diagnostics | mean={logit_mean:.4f}  std={logit_std:.4f}"
+        f"  {'✅ OK' if logit_std > 0.3 else '⚠️ LOW STD — encoder may be dormant'}"
+    )
+
+    try:
+        auc = roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else 0.5
+    except Exception:
+        auc = 0.5
+
+    # Fixed-threshold metrics (threshold=0.5)
+    preds_fixed = (probs >= 0.5).astype(int)
+    acc_fixed   = accuracy_score(labels, preds_fixed)
+    prec_fixed  = precision_score(labels, preds_fixed, zero_division=0)
+    rec_fixed   = recall_score(labels, preds_fixed, zero_division=0)
+    f1_fixed    = f1_score(labels, preds_fixed, zero_division=0)
+
+    # Optimal-threshold metrics calculation
+    opt_thresh = 0.5
+    if len(np.unique(labels)) > 1:
+        try:
+            fpr, tpr, thresholds = roc_curve(labels, probs)
+            optimal_idx = (tpr - fpr).argmax()
+            opt_thresh  = float(thresholds[optimal_idx])
+        except Exception:
+            pass
+    preds_opt = (probs >= opt_thresh).astype(int)
+    acc_opt   = accuracy_score(labels, preds_opt)
+    prec_opt  = precision_score(labels, preds_opt, zero_division=0)
+    rec_opt   = recall_score(labels, preds_opt, zero_division=0)
+    f1_opt    = f1_score(labels, preds_opt, zero_division=0)
+
+    tqdm.write(
+        f"   🛡️  Alzheimer Val  | AUC={auc:.4f}\n"
+        f"   📌 Fixed  thr=0.50 | Acc={acc_fixed:.3f}  Prec={prec_fixed:.3f}  "
+        f"Rec={rec_fixed:.3f}  F1={f1_fixed:.3f}\n"
+        f"   🎯 Optimal thr={opt_thresh:.2f} | Acc={acc_opt:.3f}  Prec={prec_opt:.3f}  "
+        f"Rec={rec_opt:.3f}  F1={f1_opt:.3f}"
+    )
+
+    # Return fixed-threshold metrics for history (consistent across epochs)
+    acc, prec, rec, f1 = acc_fixed, prec_fixed, rec_fixed, f1_fixed
+    return {"auc": auc, "accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
+
+def check_batches(tumor_loader, stroke_loader):
+    """Pre-training batch sanity check."""
+    print("\n🔍 PRE-TRAINING BATCH CHECK 🔍")
+    try:
+        batch = next(iter(tumor_loader))
+        img, seg = batch["image"], batch["seg"]
+        print(f"✅ Tumor Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
+        if seg.sum() < 1:
+            print("⚠️ WARNING: Tumor mask sum is 0!")
+
+        batch = next(iter(stroke_loader))
+        img, seg = batch["image"], batch["seg"]
+        print(f"✅ Stroke Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
+        if seg.sum() < 1:
+            print("⚠️ WARNING: Stroke mask sum is 0 (Small lesion lost in resize?)")
+    except Exception as e:
+        print(f"❌ Batch Check Failed: {e}")
+    print("="*40 + "\n")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TRAINING LOOP
+#  6. MAIN LOOP
 # ═══════════════════════════════════════════════════════════════════════════
-
-def train_phase(model, phase_config, phase_num):
-    print("\n" + "=" * 80)
-    print(f"🎯 {phase_config['name']}")
-    print(f"🔒 Encoder Freeze: {phase_config['freeze_encoder']}")
-    print(f"📊 Has Segmentation: {phase_config['has_segmentation']}")
-    print("=" * 80 + "\n")
-    
-    model.freeze_encoder(phase_config["freeze_encoder"])
-    
-    # Create dataset
-    disease = phase_config["dataset_type"]
-    path = phase_config["dataset_path"]
-    
-    if disease == "tumor":
-        dataset = TumorDataset(path)
-    elif disease == "stroke":
-        dataset = StrokeDataset(path)
-    else:  # alzheimer
-        dataset = AlzheimerDataset(path)
-        # PRODUCTION FIX: Compute Alzheimer class weights for pos_weight
-        if disease == "alzheimer":
-            alzheimer_pos_weight = torch.tensor([dataset.get_class_weights()]).to(DEVICE)
-        else:
-            alzheimer_pos_weight = None
-    
-    if len(dataset) == 0:
-        print("⚠️ Empty dataset - skipping\n")
-        return
-    
-    # Train/val split
-    train_size = int((1 - VALIDATION_SPLIT) * len(dataset))
-    val_size = len(dataset) - train_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
-    print(f"📊 Train: {train_size}, Val: {val_size}\n")
-    
-    train_loader = DataLoader(
-    train_ds,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=True,
-    collate_fn=collate_fn)
-
-    val_loader = DataLoader(
-    val_ds,
-    batch_size=BATCH_SIZE,
-    shuffle=False,
-    num_workers=NUM_WORKERS,
-    pin_memory=True,
-    collate_fn=collate_fn)
-
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable, lr=LR, weight_decay=WEIGHT_DECAY)
-    scaler = torch.amp.GradScaler('cuda', enabled=USE_AMP)
-    criterion = CalibratedConditionalLoss()
-    best_metric = 0.0
-    
-    # CRITICAL FIX: Create Alzheimer-specific loss with pos_weight
-    # This handles class imbalance (CN vs AD/MCI) without oversampling
-    if disease == "alzheimer" and 'alzheimer_pos_weight' in locals():
-        alzheimer_criterion = nn.BCEWithLogitsLoss(pos_weight=alzheimer_pos_weight)
-        print(f"  🎯 Alzheimer BCEWithLogitsLoss created with pos_weight={alzheimer_pos_weight.item():.2f}\n")
-    else:
-        alzheimer_criterion = None
-    
-    # Adaptive freezing tracking (NEW)
-    auc_history = deque(maxlen=ADAPTIVE_FREEZE_PATIENCE)
-    encoder_unfrozen = False
-    
-    # Curriculum learning schedule  (NEW)
-    total_epochs = phase_config["epochs"]
-    curriculum_enabled = total_epochs > CURRICULUM_STAGE1_EPOCHS + CURRICULUM_STAGE2_EPOCHS
-    
-    for epoch in range(1, total_epochs + 1):
-        model.train()
-        
-        # Curriculum Learning: Automated progressive training (NEW)
-        # Scientific Rationale: Start with simpler task (presence), then add complexity (segmentation),
-        # finally unfreeze encoder for fine-tuning. Prevents catastrophic forgetting.
-        if curriculum_enabled:
-            if epoch <= CURRICULUM_STAGE1_EPOCHS:
-                # Stage 1: Presence only, encoder frozen
-                current_freeze = True
-                train_segmentation = False
-                stage_name = "Stage 1: Presence (Frozen)"
-            elif epoch <= CURRICULUM_STAGE1_EPOCHS + CURRICULUM_STAGE2_EPOCHS:
-                # Stage 2: Presence + segmentation, encoder still frozen
-                current_freeze = True
-                train_segmentation = phase_config["has_segmentation"]
-                stage_name = "Stage 2: Presence+Seg (Frozen)"
-            else:
-                # Stage 3: Full unfreezing
-                current_freeze = False
-                train_segmentation = phase_config["has_segmentation"]
-                stage_name = "Stage 3: Full Training"
-                
-                if not encoder_unfrozen:
-                    model.freeze_encoder(False)
-                    # Rebuild optimizer with newly unfrozen parameters
-                    trainable = [p for p in model.parameters() if p.requires_grad]
-                    optimizer = torch.optim.AdamW(trainable, lr=LR * 0.1, weight_decay=WEIGHT_DECAY)
-                    encoder_unfrozen = True
-                    print(f"🔓 Encoder unfrozen at epoch {epoch}!")
-        else:
-            # No curriculum: Use original freeze settings
-            train_segmentation = phase_config["has_segmentation"]
-            stage_name = "Standard Training"
-        
-        total_loss = 0
-        n = 0
-        
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs} - {stage_name}")
-        for batch_idx, batch in enumerate(pbar):
-            x = batch["image"].to(DEVICE, non_blocking=True)
-            x_global = batch.get("image_global")
-            if x_global is not None:
-                x_global = x_global.to(DEVICE, non_blocking=True)
-            
-            seg_target = batch["seg"].to(DEVICE, non_blocking=True)
-            has_seg = batch["has_seg"].to(DEVICE, non_blocking=True)
-            pres_target = batch[f"{disease}_presence"].to(DEVICE, non_blocking=True)
-            
-            with torch.amp.autocast('cuda', enabled=USE_AMP):
-                # Forward with multi-scale
-                if train_segmentation:
-                    output = model(x, active_presence=[disease], active_seg=[disease], 
-                                 x_global=x_global, compute_ood=True)
-                    seg_pred = output["segmentations"][disease]
-                else:
-                    output = model(x, active_presence=[disease], active_seg=None,
-                                 x_global=x_global, compute_ood=True)
-                    seg_pred = None
-                    seg_target = None
-                
-                pres_pred = output["presence"][disease]
-                ood_conf = output.get("ood_confidence")
-                
-                # Use Alzheimer-specific loss if available, otherwise standard calibrated loss
-                if seg_pred is not None:
-                    # Has segmentation (Tumor/Stroke)
-                    loss, loss_dict = criterion(seg_pred, seg_target, pres_pred, pres_target, 
-                                               has_seg, ood_confidence=ood_conf)
-                else:
-                    # Presence only (Alzheimer or curriculum stage 1)
-                    if disease == "alzheimer" and alzheimer_criterion is not None:
-                        # Use pos_weight BCE for Alzheimer class imbalance
-                        presence_loss = alzheimer_criterion(pres_pred, pres_target)
-                        # OOD disabled (weight=0), but keep computation for code consistency
-                        ood_loss = torch.tensor(0.0, device=DEVICE)
-                        if ood_conf is not None and OOD_ENTROPY_WEIGHT > 0:
-                            eps = 1e-8
-                            ood_entropy = -(ood_conf * torch.log(ood_conf + eps) + 
-                                          (1 - ood_conf) * torch.log(1 - ood_conf + eps))
-                            ood_loss = -ood_entropy.mean() * OOD_ENTROPY_WEIGHT
-                        loss = presence_loss + ood_loss
-                        loss_dict = {"total": loss.item(), "presence": presence_loss.item(), 
-                                   "seg": 0.0, "ood": ood_loss.item()}
-                    else:
-                        # Standard presence-only loss
-                        loss, loss_dict = criterion(None, None, pres_pred, pres_target, 
-                                                   torch.tensor([0.0]), ood_confidence=ood_conf)
-                
-                # CRITICAL FIX: Gradient Accumulation Implementation
-                # Scale loss to simulate larger batch size
-                loss = loss / GRADIENT_ACCUMULATION_STEPS
-            
-            # Backward pass (gradients accumulate)
-            scaler.scale(loss).backward()
-            
-            # Only update weights every GRADIENT_ACCUMULATION_STEPS batches
-            if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(trainable, GRADIENT_CLIP)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-            
-            total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS  # Unscale for logging
-            n += 1
-            pbar.set_postfix({"loss": f"{loss.item() * GRADIENT_ACCUMULATION_STEPS:.3f}", 
-                            "ood": f"{loss_dict.get('ood', 0.0):.4f}"})
-        
-        avg_loss = total_loss / max(1, n)
-        
-        # Validation with uncertainty + Grad-CAM (first epoch saves CAM)
-        val_dice, val_auc, val_uncertainty = validate(model, val_loader, phase_config, 
-                                                       save_gradcam=(epoch == 1))
-        
-        # Adaptive Encoder Freezing (NEW)
-        # Scientific Rationale: If AUC plateaus, encoder needs fine-tuning to escape local minimum
-        if phase_config["freeze_encoder"] and not encoder_unfrozen and not curriculum_enabled:
-            auc_history.append(val_auc)
-            if len(auc_history) == ADAPTIVE_FREEZE_PATIENCE:
-                auc_improvement = max(auc_history) - min(auc_history)
-                if auc_improvement < ADAPTIVE_FREEZE_DELTA:
-                    print(f"\n🔓 AUC plateau detected (improvement={auc_improvement:.4f}). Unfreezing encoder!")
-                    model.freeze_encoder(False)
-                    trainable = [p for p in model.parameters() if p.requires_grad]
-                    optimizer = torch.optim.AdamW(trainable, lr=LR * 0.1, weight_decay=WEIGHT_DECAY)
-                    encoder_unfrozen = True
-                    auc_history.clear()
-        
-        if phase_config["has_segmentation"]:
-            print(f"✅ Epoch {epoch}: Loss={avg_loss:.4f} | Dice={val_dice:.4f} | AUC={val_auc:.4f}")
-            metric = val_dice
-        else:
-            print(f"✅ Epoch {epoch}: Loss={avg_loss:.4f} | AUC={val_auc:.4f} (presence-only)")
-            metric = val_auc
-        
-        if metric > best_metric:
-            best_metric = metric
-            ckpt = CHECKPOINT_DIR / f"neurox_phase{phase_num}_best.pth"
-            torch.save(model.state_dict(), ckpt)
-            print(f"💾 Saved: {ckpt.name} (metric={metric:.4f})")
-        
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
 
 def main():
-    print("\n🏗️ Initializing NeuroX Multi-Disease Model...")
-    model = NeuroXMultiDisease().to(DEVICE)
-    print(f"✅ Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"📋 Presence Heads: {list(model.presence_heads.keys())}")
-    print(f"📋 Segmentation Decoders: {list(model.seg_decoders.keys())}\n")
+    global USE_AMP
+    # 1. Prepare Datasets
+    tumor_ds = TumorDataset("/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/", debug=DEBUG)
+    stroke_ds = StrokeDataset("/kaggle/input/datasets/orvile/isles-2022-brain-stoke-dataset/", debug=DEBUG)
     
-    for idx, phase in enumerate(TRAINING_PHASES, 1):
-        train_phase(model, phase, idx)
-    
-    final = CHECKPOINT_DIR / "neurox_multihead_final.pth"
-    torch.save(model.state_dict(), final)
-    print("\n" + "=" * 80)
-    print("🎉 MULTI-DISEASE TRAINING COMPLETE")
-    print("=" * 80)
-    print(f"💾 Final Model: {final}")
-    print(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("\n✅ Model supports: Tumor | Stroke | Alzheimer Detection\n")
+    alz_train_data, alz_val_data = build_alzheimer_subject_split(
+        "/kaggle/input/datasets/muhammadzahraan/3d-mri-scans-for-alzheimer-disease",
+        seed=SEED,
+        debug=DEBUG
+    )
+    # New AlzheimerDataset supports record-based initialization
+    alz_train_ds = AlzheimerDataset(alz_train_data, augment=True)
+    alz_val_ds = AlzheimerDataset(alz_val_data, augment=False)
 
+    # Compute Alzheimer class weight from training labels
+    global ALZ_POS_WEIGHT
+    if alz_train_data:
+        alz_labels = [record["label"] for record in alz_train_data]
+        counts = Counter(alz_labels)
+        pos_w = counts.get(0, 1) / max(counts.get(1, 1), 1)  # N_neg / N_pos
+        ALZ_POS_WEIGHT = torch.tensor([pos_w], device=DEVICE)
+        print(f"✅ ALZ_POS_WEIGHT = {pos_w:.2f} (neg={counts.get(0,0)}, pos={counts.get(1,0)})")
+    else:
+        ALZ_POS_WEIGHT = None
+    
+    # 2. DataLoaders
+    loader_kwargs = dict(
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=(NUM_WORKERS > 0)
+    )
+    tumor_loader  = DataLoader(tumor_ds, **loader_kwargs)
+    stroke_loader = DataLoader(stroke_ds, **loader_kwargs)
+    alz_train_loader = DataLoader(alz_train_ds, **loader_kwargs)
+    alz_val_loader   = DataLoader(alz_val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                                  num_workers=NUM_WORKERS, pin_memory=True,
+                                  persistent_workers=(NUM_WORKERS > 0))
+    # Calculate Stroke Class Imbalance (Dynamic Once)
+    print("\n⚖️  Calculating Stroke Class Imbalance...")
+    total_pos = 0
+    total_voxels = 0
+    for i in range(len(stroke_ds)):
+        sample = stroke_ds[i]
+        mask = sample["seg"]
+        total_pos += mask.sum().item()
+        total_voxels += mask.numel()
+    
+    total_neg = total_voxels - total_pos
+    s_weight = min(total_neg / (total_pos + 1e-6), 50.0)
+    global STROKE_POS_WEIGHT
+    STROKE_POS_WEIGHT = torch.tensor([s_weight], device=DEVICE)
+    print(f"   Stroke pos_weight: {s_weight:.2f} (Capped at 50)")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  7. OPTIMIZER & SCALER (PHASE-AWARE GROUPS)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # 3. Setup Model & Optimizers
+    model = NeuroXMultiDisease().to(DEVICE)
+
+    # Separate Conv vs Transformer parameters for shared encoder components
+    conv_params = []
+    transformer_params = []
+
+    for name, p in model.named_parameters():
+        # Includes shared encoder convs, seg decoders, and presence heads
+        if "alz_encoder" in name:
+            continue
+        if "bottleneck" in name:
+            transformer_params.append(p)
+        else:
+            conv_params.append(p)
+
+    optimizer_shared = torch.optim.AdamW([
+        {"params": conv_params,        "lr": 1e-4}, 
+        {"params": transformer_params, "lr": 5e-5}
+    ], weight_decay=WEIGHT_DECAY)
+
+    optimizer_alz = torch.optim.AdamW(model.alz_encoder.parameters(), lr=1e-4, weight_decay=WEIGHT_DECAY)
+
+    # Initial scalers
+    scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
+    scaler_alz    = torch.amp.GradScaler(enabled=USE_AMP)
+
+    # Dual Schedulers (Removed for stability - using constant LRs)
+    scheduler_shared = None
+    scheduler_alz    = None
+    
+    # Pre-Training Check
+    check_batches(tumor_loader, stroke_loader)
+    
+    print(f"🚀 Starting Training (DEBUG={DEBUG}, EPOCHS={EPOCHS})...")
+    
+    # Metrics history — defined BEFORE loop so each epoch appends cumulatively
+    metrics_history = {
+        "epoch":         [],
+        "tumor_et":      [],
+        "tumor_ncr":     [],
+        "tumor_ed":      [],
+        "tumor_mean":    [],
+        "stroke_dice":   [],
+        "alz_auc":       [],
+        "alz_accuracy":  [],
+        "alz_precision": [],
+        "alz_recall":    [],
+        "alz_f1":        [],
+    }
+    
+    for epoch in range(1, EPOCHS + 1):
+        global LAMBDA_CLS
+        # ─── 80-EPOCH CURRICULUM ──────────────────────────────────
+        if epoch <= 20:
+            phase_name = " PHASE 1: ALZHEIMER PRETRAINING"
+            TRAIN_ALZ, TRAIN_SEG = True, False
+        else:
+            phase_name = " PHASE 2: SEGMENTATION (STABILIZED)"
+            TRAIN_ALZ, TRAIN_SEG = False, True
+
+        # ─── PHASE TRANSITIONS (CURRICULUM LOGIC) ──────────────────────────
+        
+        if epoch == 1:
+            print(f"\n❄️  PHASE 1: ALZHEIMER PRE-TRAIN")
+            for name, p in model.named_parameters():
+                if "alz_encoder" in name: p.requires_grad = True
+                else: p.requires_grad = False
+            USE_AMP = True
+            TRAIN_ALZ, TRAIN_SEG = True, False
+            LAMBDA_CLS = 2.0
+
+        if epoch == 21:
+            print(f"\n🔥 PHASE 2A: SEGMENTATION WARMUP (AMP OFF, TRANS FROZEN)")
+            for name, p in model.named_parameters():
+                if "alz_encoder" in name: p.requires_grad = False
+                elif "bottleneck" in name: p.requires_grad = False
+                else: p.requires_grad = True
+            
+            USE_AMP = False
+            LAMBDA_CLS = 0.0 # Pure segmentation phase
+            scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
+            
+            # Dampening LR for Phase Transition (Epoch 21-22)
+            optimizer_shared.param_groups[0]['lr'] = 5e-5 # convs
+            TRAIN_ALZ, TRAIN_SEG = False, True
+
+        if epoch == 23:
+            print(f"\n📈 Phase 2A': Standardizing Seg LR")
+            optimizer_shared.param_groups[0]['lr'] = 1e-4
+
+        if epoch == 26:
+            print(f"\n🚀 PHASE 2B: FULL SEGMENTATION (AMP ON, TRANS UNFROZEN)")
+            for name, p in model.named_parameters():
+                if "bottleneck" in name: p.requires_grad = True
+            
+            USE_AMP = True
+            scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
+            optimizer_shared.param_groups[1]['lr'] = 5e-5 # transformer
+
+        # ─── Loop Setup ─────────────────────────────────────────────────────
+        model.train()
+        
+        tumor_iter  = iter(tumor_loader)  if TRAIN_SEG else None
+        stroke_iter = iter(stroke_loader) if TRAIN_SEG else None
+        alz_iter    = iter(alz_train_loader) if TRAIN_ALZ else None
+        
+        t_losses, s_losses, a_losses = [], [], []
+        t_et_dices, t_ncr_dices, t_ed_dices = [], [], []
+        s_dices = []
+        
+        avg_et, avg_ncr, avg_ed, avg_tumor_mean, avg_stroke, avg_alz_loss = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+        if TRAIN_ALZ:
+            max_steps = len(alz_train_loader)
+        elif TRAIN_SEG:
+            max_steps = min(len(tumor_loader), len(stroke_loader))
+        else:
+            max_steps = 0
+
+        print(f"\n{'='*75}")
+        print(f"  EPOCH {epoch}/{EPOCHS} | TRAIN_ALZ={TRAIN_ALZ} TRAIN_SEG={TRAIN_SEG} AMP={USE_AMP}")
+        print(f"{'='*75}")
+        
+        for step in range(max_steps):
+            if TRAIN_SEG: optimizer_shared.zero_grad()
+            if TRAIN_ALZ: optimizer_alz.zero_grad()
+            
+            # --- Alzheimer Update (Phase 1) ---
+            if TRAIN_ALZ:
+                try:
+                    batch = next(alz_iter)
+                    loss = train_step(model, batch, "alzheimer", optimizer_alz, scaler_alz, epoch)
+                    if loss is not None: a_losses.append(loss)
+                except (StopIteration, TypeError):
+                    pass
+            
+            # --- Unified Segmentation Update (Phase 2) ---
+            if TRAIN_SEG:
+                try:
+                    t_batch = next(tumor_iter)
+                    s_batch = next(stroke_iter)
+                    
+                    # Outer autocast removed (handled in train_step)
+                    loss_tumor  = train_step(model, t_batch, "tumor", optimizer_shared, scaler_shared, epoch, skip_backward=True)
+                    loss_stroke = train_step(model, s_batch, "stroke", optimizer_shared, scaler_shared, epoch, skip_backward=True)
+                    
+                    if loss_tumor is not None and loss_stroke is not None:
+                        total_seg_loss = loss_tumor + loss_stroke
+                        scaler_shared.scale(total_seg_loss).backward()
+                        
+                        scaler_shared.unscale_(optimizer_shared)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        
+                        scaler_shared.step(optimizer_shared)
+                        scaler_shared.update()
+                        
+                        t_losses.append(loss_tumor.item())
+                        s_losses.append(loss_stroke.item())
+                        
+                        # --- Metrics Logging (CRITICAL Fix) ---
+                        with torch.no_grad():
+                            # Mode flips removed (already in model.train())
+                            
+                            # Tumor Metrics
+                            t_res = model(t_batch["image"].to(DEVICE), active_seg=["tumor"])
+                            t_out = t_res["segmentations"]["tumor"]
+                            et_d  = quick_dice(t_out[:, 0:1], t_batch["seg"][:, 0:1].to(DEVICE))
+                            ncr_d = quick_dice(t_out[:, 1:2], t_batch["seg"][:, 1:2].to(DEVICE))
+                            ed_d  = quick_dice(t_out[:, 2:3], t_batch["seg"][:, 2:3].to(DEVICE))
+                            t_et_dices.append(et_d)
+                            t_ncr_dices.append(ncr_d)
+                            t_ed_dices.append(ed_d)
+                            
+                            # Stroke Metrics
+                            s_res = model(s_batch["image"].to(DEVICE), active_seg=["stroke"])
+                            s_out = s_res["segmentations"]["stroke"]
+                            s_d = quick_dice(s_out, s_batch["seg"].to(DEVICE))
+                            s_dices.append(s_d)
+
+                        # First 10 steps startup debug
+                        if epoch == 21 and step < 10:
+                            p_mean = torch.sigmoid(s_out).mean().item()
+                            g_mean = s_batch["seg"].mean().item()
+                            tqdm.write(f"   [P2 Startup Step {step}] Stroke Pred Mean: {p_mean:.4f} | GT Mean: {g_mean:.4f}")
+
+                except (StopIteration, TypeError):
+                    pass
+            
+            # Print progress every 50 steps
+            if (step + 1) % 50 == 0 or step == max_steps - 1:
+                log_parts = [f"  Step {step+1:>4}/{max_steps}"]
+                if TRAIN_SEG:
+                    t_l = np.mean(t_losses[-50:]) if t_losses else 0.0
+                    s_l = np.mean(s_losses[-50:]) if s_losses else 0.0
+                    et_d = np.mean(t_et_dices[-50:]) if t_et_dices else 0.0
+                    s_d  = np.mean(s_dices[-50:]) if s_dices else 0.0
+                    log_parts.append(f"T_L={t_l:.3f} | S_L={s_l:.3f} | ET_D={et_d:.3f} | Str_D={s_d:.3f}")
+                if TRAIN_ALZ:
+                    log_parts.append(f"A_L={np.mean(a_losses[-50:]):.3f}")
+                tqdm.write(" | ".join(log_parts))
+        
+        # ── Epoch Summary ────────────────────────────────────────────────────
+        if TRAIN_SEG:
+            avg_et  = np.mean(t_et_dices)  if t_et_dices  else 0.0
+            avg_ncr = np.mean(t_ncr_dices) if t_ncr_dices else 0.0
+            avg_ed  = np.mean(t_ed_dices)  if t_ed_dices  else 0.0
+            avg_tumor_mean = (avg_et + avg_ncr + avg_ed) / 3.0
+            avg_stroke = np.mean(s_dices) if s_dices else 0.0
+
+            print(f"  🧠 Tumor  | Loss: {np.mean(t_losses) if t_losses else 0:.4f}")
+            print(f"     ET  Dice : {avg_et:.4f}  ← primary benchmark")
+            print(f"     NCR Dice : {avg_ncr:.4f}")
+            print(f"     ED  Dice : {avg_ed:.4f}")
+            print(f"     Mean     : {avg_tumor_mean:.4f}")
+            print(f"  🩸 Stroke | Loss: {np.mean(s_losses) if s_losses else 0:.4f} | Dice: {avg_stroke:.4f}")
+        
+        if TRAIN_ALZ:
+            avg_alz_loss = np.mean(a_losses) if a_losses else 0.0
+            print(f"  🧬 Alz    | Loss: {avg_alz_loss:.4f}")
+        sys.stdout.flush()
+
+        if TRAIN_ALZ:
+            # Alzheimer Validation — full metrics (AUC + Acc + Prec + Rec + F1)
+            alz_metrics = evaluate_alzheimer_full(model, alz_val_loader)
+            alz_auc = alz_metrics["auc"]
+
+            # Append metrics
+            metrics_history["alz_auc"].append(round(alz_auc, 4))
+            metrics_history["alz_accuracy"].append(round(alz_metrics["accuracy"], 4))
+            metrics_history["alz_precision"].append(round(alz_metrics["precision"], 4))
+            metrics_history["alz_recall"].append(round(alz_metrics["recall"], 4))
+            metrics_history["alz_f1"].append(round(alz_metrics["f1"], 4))
+        else:
+            # Pad Alzheimer metrics with last known value
+            last_auc = metrics_history["alz_auc"][-1] if metrics_history["alz_auc"] else 0.0
+            metrics_history["alz_auc"].append(last_auc)
+            metrics_history["alz_accuracy"].append(metrics_history["alz_accuracy"][-1] if metrics_history["alz_accuracy"] else 0.0)
+            metrics_history["alz_precision"].append(metrics_history["alz_precision"][-1] if metrics_history["alz_precision"] else 0.0)
+            metrics_history["alz_recall"].append(metrics_history["alz_recall"][-1] if metrics_history["alz_recall"] else 0.0)
+            metrics_history["alz_f1"].append(metrics_history["alz_f1"][-1] if metrics_history["alz_f1"] else 0.0)
+
+        # Unified history updates for segmentation
+        metrics_history["epoch"].append(epoch)
+        metrics_history["tumor_et"].append(round(avg_et, 4))
+        metrics_history["tumor_ncr"].append(round(avg_ncr, 4))
+        metrics_history["tumor_ed"].append(round(avg_ed, 4))
+        metrics_history["tumor_mean"].append(round(avg_tumor_mean, 4))
+        metrics_history["stroke_dice"].append(round(avg_stroke, 4))
+
+        # ─── Scheduler Step (Removed for stability) ────────────
+        print(f"     LR Shared: {optimizer_shared.param_groups[0]['lr']:.2e} | LR Alz: {optimizer_alz.param_groups[0]['lr']:.2e}")
+        
+        sys.stdout.flush()
+        
+        # Checkpoint — Full (for training resume)
+        torch.save({
+            "model":    model.state_dict(),
+            "optimizer_shared": optimizer_shared.state_dict(),
+            "optimizer_alz":    optimizer_alz.state_dict(),
+            "epoch":    epoch,
+            "metrics":  metrics_history,
+        }, CHECKPOINT_DIR / "neurox_checkpoint.pth")
+        
+        # Checkpoint — Inference weights + metrics
+        torch.save({
+            "model_state": model.state_dict(),
+            "metrics":     metrics_history,
+        }, CHECKPOINT_DIR / "neurox_model.pth")
+        
+        print(f"✅ Epoch {epoch} Complete. Checkpoints saved.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n⚠️ Interrupted")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    main()
