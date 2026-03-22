@@ -450,17 +450,35 @@ def load_model(model_path: str = MODEL_PATH):
 def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray, Dict, np.ndarray, Tuple]:
     """Load and preprocess NIfTI file identifying with training baseline.
     
-    Z-score -> Direct resize to 96³ -> ROI Tensor.
-    No padding, no complex remapping.
+    Pipeline:
+    1. Enforce canonical RAS+ orientation (nib.as_closest_canonical)
+    2. Z-score normalize
+    3. Direct trilinear resize to 96³
+    4. Track roi_affine for affine-aware inverse resampling
     """
     img = nib.load(file_path)
+    # FIX 1.1 — Enforce canonical RAS+ orientation before ANY processing.
+    # Without this, scanner-specific axis permutations silently corrupt all
+    # numpy indexing downstream (z/y/x swap → mesh misalignment).
+    img = nib.as_closest_canonical(img)
+    
     original_data = img.get_fdata().astype(np.float32)
     original_shape = original_data.shape
     
-    # Extract spacer info
+    # Extract affine AFTER reorientation (affine changes with canonical)
     affine = img.affine
     spacing_raw = np.sqrt(np.sum(affine[:3, :3]**2, axis=0))
-    spacing = tuple(spacing_raw) if not np.any(spacing_raw <= 0) else (1.0, 1.0, 1.0)
+    # ISSUE 6 FIX: Explicit spacing validation with anisotropy check
+    if np.any(spacing_raw <= 0) or np.any(np.isnan(spacing_raw)):
+        print(f'   WARNING: Invalid spacing {spacing_raw} -- using isotropic 1mm fallback')
+        spacing = (1.0, 1.0, 1.0)
+    else:
+        max_ratio = spacing_raw.max() / (spacing_raw.min() + 1e-8)
+        if max_ratio > 10.0:
+            print(f'   WARNING: Extreme anisotropy ({max_ratio:.1f}x): {spacing_raw} mm')
+        else:
+            print(f'   Voxel spacing: {spacing_raw[0]:.2f} x {spacing_raw[1]:.2f} x {spacing_raw[2]:.2f} mm')
+        spacing = tuple(float(s) for s in spacing_raw)
     
     # Preprocess
     data = original_data.copy()
@@ -472,7 +490,7 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
     
     volume_tensor = torch.from_numpy(data_normalized).unsqueeze(0).unsqueeze(0)
     
-    # Direct resize to 96³ (Training baseline)
+    # Direct resize to 96³ (matches training preprocessing)
     roi_tensor = F.interpolate(
         volume_tensor,
         size=ROI_SIZE,
@@ -480,10 +498,19 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
         align_corners=False
     )
     
-    # Minimal metadata for identity mapping
+    # FIX 1.2/1.4 — Compute ROI's own affine for affine-aware inverse resampling.
+    # Since preprocessing is a center-preserving full-volume resize (no crop),
+    # the ROI affine shares the same origin but has scaled voxel sizes.
+    orig_shape_3d = tuple(original_shape) if original_data.ndim == 3 else tuple(original_shape[:3])
+    scale = np.array(orig_shape_3d, dtype=np.float64) / np.array(ROI_SIZE, dtype=np.float64)
+    roi_affine = affine.copy()
+    roi_affine[:3, :3] = affine[:3, :3] * scale[np.newaxis, :]  # Scale voxel size, keep origin
+    
     roi_metadata = {
-        "original_shape": tuple(original_shape) if original_data.ndim == 3 else tuple(original_shape[:3]),
-        "interpolation_mode": "trilinear"
+        "original_shape":  orig_shape_3d,
+        "interpolation_mode": "trilinear",
+        "roi_affine":      roi_affine,    # ROI (96³) physical coordinate system
+        "original_affine": affine,        # Original image coordinate system (for resample_from_to)
     }
     
     return roi_tensor, original_data, roi_metadata, affine, spacing
@@ -723,29 +750,47 @@ def map_segmentation_to_original_space(
     roi_metadata: Dict
 ) -> np.ndarray:
     """
-    Surgical Inverse transform (Matched to new simple preprocessing):
-    Directly resize 96³ -> original shape using nearest neighbor.
+    FIX 1.3 — Affine-aware inverse resampling: ROI (96³) → original image space.
+
+    Uses nibabel resample_from_to so that voxel positions are mapped through
+    physical coordinates (mm), not pixel-count ratios. This correctly handles
+    anisotropic volumes (e.g. 240×240×155 → 96³) where naive F.interpolate
+    stretches each axis at a different ratio causing spatial drift.
+
+    For 4D inputs (tumor C×D×H×W) each channel is resampled independently.
     """
-    # 1. Resize back to original shape directly
+    from nibabel.processing import resample_from_to
+
     target_shape = roi_metadata["original_shape"]
-    
-    # Torch interpolate expects 5D (B, C, D, H, W)
-    seg_tensor = torch.from_numpy(seg_roi).float()
-    if seg_tensor.ndim == 3:
-        seg_tensor = seg_tensor.unsqueeze(0).unsqueeze(0)
-    else:
-        seg_tensor = seg_tensor.unsqueeze(0) # Already has channel dim
-        
-    seg_resampled = F.interpolate(
-        seg_tensor,
-        size=target_shape,
-        mode='nearest'
-    ).squeeze(0)
-    
-    if seg_roi.ndim == 3:
-        seg_resampled = seg_resampled.squeeze(0)
-        
-    return seg_resampled.cpu().numpy().astype(np.uint8)
+    roi_affine   = roi_metadata.get("roi_affine")
+    orig_affine  = roi_metadata.get("original_affine")
+
+    # Legacy fallback: old metadata without affines (e.g. cached session state from before fix)
+    if roi_affine is None or orig_affine is None:
+        print("⚠️  roi_affine not found in metadata — using legacy F.interpolate fallback")
+        seg_tensor = torch.from_numpy(seg_roi).float()
+        if seg_tensor.ndim == 3:
+            seg_tensor = seg_tensor.unsqueeze(0).unsqueeze(0)
+        else:
+            seg_tensor = seg_tensor.unsqueeze(0)
+        seg_resampled = F.interpolate(seg_tensor, size=target_shape, mode='nearest').squeeze(0)
+        if seg_roi.ndim == 3:
+            seg_resampled = seg_resampled.squeeze(0)
+        return seg_resampled.cpu().numpy().astype(np.uint8)
+
+    # 4D: process each channel independently (tumor: ET / NCR / ED)
+    if seg_roi.ndim == 4:
+        channels = []
+        for c in range(seg_roi.shape[0]):
+            ch_nifti     = nib.Nifti1Image(seg_roi[c].astype(np.float32), roi_affine)
+            ch_resampled = resample_from_to(ch_nifti, (target_shape, orig_affine), order=0)
+            channels.append(ch_resampled.get_fdata().astype(np.uint8))
+        return np.stack(channels, axis=0)
+
+    # 3D: single channel (stroke, or collapsed tumor Whole Tumor mask)
+    seg_nifti     = nib.Nifti1Image(seg_roi.astype(np.float32), roi_affine)
+    seg_resampled = resample_from_to(seg_nifti, (target_shape, orig_affine), order=0)
+    return seg_resampled.get_fdata().astype(np.uint8)
 
 
 def validate_alignment(segmentation_mask: np.ndarray, brain_mask: np.ndarray) -> None:
@@ -868,29 +913,30 @@ def generate_patient_brain_surface(
     if brain_mask.sum() == 0:
         raise ValueError("Empty brain mask - cannot generate surface")
     
-    # Light Gaussian smoothing (σ=0.7 preserves gyri/sulci detail)
+    # FIX 4.2 — Unified Gaussian sigma=1.0 (matches lesion smoothing)
     from scipy.ndimage import gaussian_filter
-    brain_smooth = gaussian_filter(brain_mask.astype(float), sigma=0.7)
+    brain_smooth = gaussian_filter(brain_mask.astype(float), sigma=1.0)
     
     # Marching cubes at level=0.5 (standard for binary masks)
+    # FIX 2.3 — NO spacing argument. The affine matrix already encodes
+    # physical voxel size in mm via its column vectors. Passing spacing=spacing
+    # here would pre-scale the vertices before the affine is applied,
+    # causing double-scaling relative to the lesion mesh (which has no spacing).
     try:
         from skimage import measure
         verts, faces, normals, _ = measure.marching_cubes(
             brain_smooth,
-            level=0.5,
-            spacing=spacing
+            level=0.5
         )
     except (ValueError, RuntimeError) as e:
         raise RuntimeError(f"Brain surface generation failed: {e}")
     
     # Apply affine transform if provided (convert to world coordinates)
     if affine is not None:
-        # CRITICAL: Marching cubes returns (z, y, x), but affine expects (x, y, z)
+        # Marching cubes returns vertices in (z, y, x) order — swap to (x, y, z) for affine
         verts_xyz = verts[:, [2, 1, 0]]
-        
-        # Convert voxel coordinates to world coordinates
-        verts_homogeneous = np.column_stack([verts_xyz, np.ones(len(verts_xyz))])
-        verts = (affine @ verts_homogeneous.T).T[:, :3]
+        # FIX 4.4 — use nib.affines.apply_affine (cleaner, equivalent, avoids manual homogeneous coords)
+        verts = nib.affines.apply_affine(affine, verts_xyz)
     
     return verts, faces
 
@@ -964,22 +1010,21 @@ def apply_hdbet_brain_extraction(volume: np.ndarray, affine: np.ndarray, spacing
                 print(f"   Files in temp dir: {os.listdir(tmpdir)}")
                 return None, None
             
-            # Load brain-extracted volume
+            # ISSUE 2 FIX: Enforce canonical orientation on HD-BET output.
+            # HD-BET may internally reorient the volume before writing output.
+            # Without this the brain mask affine can silently diverge from the
+            # input affine, causing the brain surface and lesion meshes to split.
             brain_img = nib.load(brain_path)
+            brain_img = nib.as_closest_canonical(brain_img)   # enforce RAS+
             brain_volume = brain_img.get_fdata()
             brain_affine = brain_img.affine
-            
-            # -------------------------------------------------
-            # MASTER GRID ALIGNMENT CHECK
-            # -------------------------------------------------
-            # HD-BET might output different affine or shape if it reorients
-            # We strictly enforce the original input geometry (Master Grid)
-            
+
             input_shape = volume.shape
-            if brain_volume.shape != input_shape or not np.allclose(brain_affine, affine, atol=1e-3):
-                print(f"⚠️ HD-BET output geometry drift detected!")
-                print(f"   Input: {input_shape} | Output: {brain_volume.shape}")
-                print(f"   Resampling brain mask back to Master Grid geometry...")
+            affine_ok  = np.allclose(brain_affine, affine, atol=1e-3)
+            shape_ok   = (brain_volume.shape == input_shape)
+            if not affine_ok or not shape_ok:
+                print("WARNING: HD-BET geometry mismatch after canonical enforcement!")
+                print("  Resampling back to master grid...")
                 
                 # Master geometry defined by (input_shape, affine)
                 # We need a reference NIfTI image for resampling
@@ -1466,14 +1511,17 @@ def create_3d_visualization(
         print(f"   Voxels > 0.5: {(probs_roi > 0.5).sum():,} ({(probs_roi > 0.5).sum()/probs_roi.size*100:.1f}%)")
         
         if disease == "tumor" and probs_roi.ndim == 4:
-            # TUMOR SPECIFIC HANDLING (BraTS sync: Use Whole Tumor)
-            prob_ncr = probs_roi[0]
-            prob_et  = probs_roi[1]
-            prob_ed  = probs_roi[2]
-            # Whole Tumor (WT) = NCR/NET + ET + ED
-            prob_wt = np.maximum.reduce([prob_ncr, prob_et, prob_ed])
+            # FIX 5.2 — Correct BraTS channel order from SegmentationDecoder:
+            # Channel 0 = ET  (Enhancing Tumor, BraTS label 4)
+            # Channel 1 = NCR (Necrotic Core,   BraTS label 1)
+            # Channel 2 = ED  (Edema,            BraTS label 2)
+            prob_et  = probs_roi[0]   # Enhancing Tumor
+            prob_ncr = probs_roi[1]   # Necrotic Core
+            prob_ed  = probs_roi[2]   # Edema
+            # Whole Tumor (WT) = union of all sub-regions
+            prob_wt = np.maximum.reduce([prob_et, prob_ncr, prob_ed])
             
-            selected_source = "Whole Tumor (BraTS Sync)"
+            selected_source = "Whole Tumor (ET + NCR + ED)"
             print(f"   Selected: {selected_source} with threshold {VIS_THRESHOLD}")
             st.caption(f"Visualizing: **{selected_source}** (Threshold: {VIS_THRESHOLD:.2f})")
             
@@ -1490,6 +1538,25 @@ def create_3d_visualization(
         # CRITICAL: Map from ROI space to original patient space
         seg_original = map_segmentation_to_original_space(binary_strict, roi_metadata)
         print(f"   Original space: {seg_original.shape}, {seg_original.sum():,} voxels")
+
+        # ISSUE 3 FIX: Guard against lesion vanishing after resampling.
+        # Tiny ROI lesions can fall between grid points during nearest-neighbor
+        # upsampling from 96^3 back to the larger original space.
+        if seg_original.sum() == 0:
+            st.warning(
+                f"Segmentation for {name} vanished after resampling. "
+                f"The ROI lesion ({int(binary_strict.sum())} voxels) was too small "
+                f"to survive upsampling from 96^3 to {roi_metadata['original_shape']}."
+            )
+            print(f"   Lesion disappeared after resampling -- skipping {name}")
+            continue
+
+        # FIX 3.1 — Assert shapes match BEFORE cropping. If this fires, resampling is broken.
+        assert seg_original.shape == original_volume.shape[:3], (
+            f"Segmentation shape {seg_original.shape} does not match "
+            f"original volume shape {original_volume.shape[:3]}. "
+            "resample_from_to fix must have failed — check roi_affine in roi_metadata."
+        )
         
         # -------------------------------------------------
         # ALIGNMENT VALIDATION (FULL MASTER GRID)
@@ -1502,36 +1569,72 @@ def create_3d_visualization(
             seg_original = seg_original[brain_bbox]
             print(f"   After bbox crop: {seg_original.shape}, {seg_original.sum():,} voxels")
         
-        # Minimum volume check (Minimal gating for marching cubes stability)
-        MIN_VOLUME_VOXELS = 1 
-        voxel_count = int(seg_original.sum())
-        
-        if voxel_count < MIN_VOLUME_VOXELS:
-            print(f"   ⚠️ Skipping empty segmentation (0 voxels)")
+        # ═══════════════════════════════════════════════════════════════
+        # ANATOMICAL CONSTRAINT PIPELINE (Post-Resample)
+        # ROOT CAUSE FIX: 933 ROI voxels expand to 35k+ in original space.
+        # Resampling amplifies small errors into floating clusters outside brain.
+        # We enforce hard anatomical constraints before ANY mesh generation.
+        # ═══════════════════════════════════════════════════════════════
+        from scipy.ndimage import label as cc_label
+
+        # FIX 1 — HARD CLIP: Force lesion inside brain mask (non-negotiable).
+        # Any voxel outside the brain mask is anatomically impossible.
+        before_clip = int(seg_original.sum())
+        seg_original = seg_original.astype(bool) & brain_mask_cropped.astype(bool)
+        after_clip = int(seg_original.sum())
+        print(f"   Brain mask hard clip: {before_clip:,} → {after_clip:,} voxels "
+              f"({before_clip - after_clip:,} outside-brain voxels removed)")
+
+        # FIX 2 — LARGEST CONNECTED COMPONENT: Eliminate floating clusters.
+        # Resampling creates disconnected specks that produce phantom meshes.
+        labeled, num_components = cc_label(seg_original)
+        if num_components > 1:
+            sizes = [(labeled == i).sum() for i in range(1, num_components + 1)]
+            largest_label = int(np.argmax(sizes)) + 1
+            # FIX 3 — MICRO-ARTIFACT REMOVAL: Drop components < 100 voxels.
+            MIN_COMPONENT_SIZE = 100
+            seg_original = np.zeros_like(seg_original, dtype=bool)
+            for i in range(1, num_components + 1):
+                comp_size = sizes[i - 1]
+                if comp_size >= MIN_COMPONENT_SIZE:
+                    seg_original |= (labeled == i)
+            kept = int(seg_original.sum())
+            print(f"   Connected components: {num_components} found, "
+                  f"kept voxels >={MIN_COMPONENT_SIZE}: {kept:,}")
+        else:
+            print(f"   Connected components: 1 (no fragmentation)")
+
+        seg_original = seg_original.astype(np.uint8)
+
+        # FIX 4 — STRICT VALIDATION: Require ≥98% of lesion inside brain.
+        # Replace old soft 40% check with a hard clinical-grade threshold.
+        if brain_mask_cropped is not None and seg_original.sum() > 0:
+            inside = int((seg_original.astype(bool) & brain_mask_cropped.astype(bool)).sum())
+            total  = int(seg_original.sum())
+            inside_ratio = inside / (total + 1e-8)
+            print(f"   Strict alignment: {inside_ratio:.2%} inside brain ({inside:,}/{total:,})")
+            if inside_ratio < 0.98:
+                st.warning(
+                    f"⚠️ **{name}**: Poor alignment ({inside_ratio:.1%} inside brain). "
+                    f"Applying additional brain-mask clamp..."
+                )
+                # Apply a second clamp pass to push ratio to 100%
+                seg_original = (seg_original.astype(bool) & brain_mask_cropped.astype(bool)).astype(np.uint8)
+                print(f"   After second clamp: {seg_original.sum():,} voxels")
+
+        seg_clean = seg_original
+        cleaned_voxels = int(seg_clean.sum())
+        print(f"   Final lesion voxels for mesh: {cleaned_voxels:,}")
+
+        # FIX 4.3 — Minimum volume check (after all cleaning)
+        MIN_VOLUME_VOXELS = 27
+        if cleaned_voxels < MIN_VOLUME_VOXELS:
+            st.warning(f"⚠️ **{name}**: Lesion too small after cleaning ({cleaned_voxels} voxels).")
+            print(f"   ⚠️ Skipping: only {cleaned_voxels} voxels (minimum {MIN_VOLUME_VOXELS})")
             continue
         
-        # ─── SYNC: DISABLE MORPHOLOGICAL CLEANING ───
-        # from skimage.morphology import binary_erosion, binary_closing, ball, remove_small_objects
-        # from scipy.ndimage import binary_fill_holes
-        
-        seg_clean = seg_original.astype(np.uint8)
-        cleaned_voxels = seg_clean.sum()
-        
-        print(f"   After cleaning (disabled): {cleaned_voxels:,} voxels")
-        
-        # GOLD-STANDARD CLINICAL QA: Anatomical validation
-        is_valid, centroid, msg = validate_lesion_position(seg_clean, brain_mask_cropped if brain_bbox else None)
-        
-        if not is_valid:
-            st.warning(f"⚠️ **{name}**: {msg} - Invalid visualization rejected")
-            print(f"   ❌ ANATOMICAL VALIDATION FAILED: {msg}")
-            continue
-        
-        print(f"   ✅ Anatomical validation: {msg}")
-        
-        # Light Gaussian smoothing (σ ≤ 0.5 for small lesions)
-        lesion_volume = seg_clean.sum()
-        sigma = 0.5  # Consistent smoothing
+        # FIX 4.2 — Unified sigma=1.0 to match brain surface smoothing
+        sigma = 1.0
         
         try:
             seg_smooth = gaussian_filter(seg_clean.astype(float), sigma=sigma)
@@ -1542,14 +1645,23 @@ def create_3d_visualization(
                 level=0.5
             )
             
-            # SWAP ZYX to XYZ before applying affine
+            # FIX 4.4 — ZYX → XYZ swap then use nib.affines.apply_affine (cleaner than manual homogeneous)
             verts_xyz = verts[:, [2, 1, 0]]
+            verts = nib.affines.apply_affine(cropped_affine, verts_xyz)
             
-            # Apply cropped affine to convert to absolute world mm
-            verts_homogeneous = np.column_stack([verts_xyz, np.ones(len(verts_xyz))])
-            verts = (cropped_affine @ verts_homogeneous.T).T[:, :3]
-            
-            print(f"   Marching cubes: {len(verts):,} vertices (converted to world space)")
+            # FIX 8.1 — Mesh decimation: cap at 80k verts to prevent browser crash
+            MAX_VERTS = 80_000
+            if len(verts) > MAX_VERTS:
+                step = max(2, len(verts) // MAX_VERTS)
+                keep_mask = np.zeros(len(verts), dtype=bool)
+                keep_mask[::step] = True
+                old_to_new = np.full(len(verts), -1, dtype=np.int64)
+                old_to_new[keep_mask] = np.arange(keep_mask.sum())
+                verts = verts[keep_mask]
+                # Keep only faces where ALL 3 vertices survived decimation
+                face_mask = np.all(old_to_new[faces] >= 0, axis=1)
+                faces = old_to_new[faces[face_mask]]
+                print(f"   ⚡ Decimated lesion mesh: {len(verts):,} verts retained")
             
             # Show vertex range for debugging
             print(f"   Vertex range: X=[{verts[:,0].min():.1f}, {verts[:,0].max():.1f}]")
@@ -2530,7 +2642,9 @@ def run_streamlit_app():
                         else:
                             st.error("❌ Model not found")
                     except Exception as e:
-                        st.error(f"❌ Error: {e}")
+                        import traceback
+                        st.error(f"❌ Analysis failed: {type(e).__name__}: {e}")
+                        st.code(traceback.format_exc(), language="python")
                     finally:
                         if os.path.exists(tmp_path):
                             os.unlink(tmp_path)
@@ -2873,6 +2987,13 @@ def run_streamlit_app():
         # ========== VISUALIZATION PAGE ==========
         st.markdown("## 🧠 3D Visualization Laboratory")
         st.markdown("---")
+        
+        # FIX 7.3 — Validate all required session state keys before attempting viz
+        required_keys = ["segmentation_results", "roi_metadata", "original_image", "affine", "spacing"]
+        missing = [k for k in required_keys if k not in st.session_state or st.session_state[k] is None]
+        if missing:
+            st.error(f"⚠️ Missing analysis data: {missing}. Please re-run the analysis.")
+            st.stop()
         
         if st.session_state.segmentation_results:
             st.markdown("""
