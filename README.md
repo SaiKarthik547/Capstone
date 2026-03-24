@@ -735,8 +735,8 @@ This software is provided for educational and research purposes. Commercial use,
 
 ## 👥 Contributors
 
-**Sai Karthik** - Project Lead & Development
-**Manideep Sandireddy** - Development
+**Sai Karthik** - Project Lead & Development,
+**Manideep Sandireddy** - Development,
 **Sai Varshith** - Development
 ---
 
