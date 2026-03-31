@@ -12,3 +12,4 @@ matplotlib>=3.8.0
 reportlab>=4.1.0
 groq>=0.4.0
 watchdog>=4.0.0
+python-dotenv>=1.0.0

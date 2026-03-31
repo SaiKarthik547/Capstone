@@ -31,6 +31,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.units import inch
+from dotenv import load_dotenv
+
+# Load Environment Variables (.env)
+load_dotenv()
 
 # Groq AI Integration
 try:
@@ -3077,8 +3081,6 @@ def run_streamlit_app():
         st.session_state.roi_metadata = {}
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
-    if 'groq_api_key' not in st.session_state:
-        st.session_state.groq_api_key = ""
     if 'raw_nifti_bytes' not in st.session_state:
         st.session_state.raw_nifti_bytes = None
     if 'training_metrics' not in st.session_state:
@@ -4001,11 +4003,11 @@ def run_streamlit_app():
             
             with col2:
                 if st.button("✨ GENERATE REPORT", use_container_width=True):
-                    # Check for API Key in Session State
-                    api_key = st.session_state.get('groq_api_key', None)
+                    # Prioritize Environment Variable GROQ_API_KEY
+                    api_key = os.getenv("GROQ_API_KEY", None)
                     
                     if not api_key:
-                        st.warning("⚠️ No Groq API Key found. Using fallback template. Go to **Settings** to configure AI.")
+                        st.warning("⚠️ No Groq API Key found in .env file. Using fallback template.")
                     
                     with st.spinner("✍️ Generating AI report..."):
                         st.session_state.report_text = generate_ai_report(
@@ -4056,35 +4058,18 @@ def run_streamlit_app():
         
         st.markdown("""
         <div class="glass-card">
-            <h3 style="color: #00E5FF; margin-bottom: 10px;">🔑 API Configuration</h3>
-            <p style="color: #94A3B8; font-size: 13px;">Configure external AI services for enhanced reporting.</p>
+            <h3 style="color: #00E5FF; margin-bottom: 10px;">🤖 Groq AI Integration</h3>
+            <p style="color: #94A3B8; font-size: 13px;">AI radiology reporting is powered by Groq.</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # Initialize key if not present
-        if 'groq_api_key' not in st.session_state:
-            st.session_state.groq_api_key = ""
-        
-        # API Key Input
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            new_key = st.text_input(
-                "Groq API Key", 
-                value=st.session_state.groq_api_key, 
-                type="password",
-                help="Enter your Groq API key (starts with gsk_)"
-            )
-        
-        with col2:
-            st.write("") # Spacer
-            st.write("") 
-            if st.button("💾 SAVE KEY", use_container_width=True):
-                st.session_state.groq_api_key = new_key
-                st.success("✅ API Key Saved!")
-                
-        if st.session_state.groq_api_key:
-            st.info(f"✅ Active Key: {st.session_state.groq_api_key[:8]}...{st.session_state.groq_api_key[-4:]}")
+        env_key = os.getenv("GROQ_API_KEY")
+        if env_key:
+            st.success(f"✅ Securely connected via `.env` (Key: {env_key[:4]}...{env_key[-4:]})")
+            st.info("💡 Your API key is loaded from the environment. To update it, modify the `GROQ_API_KEY` entry in your project's `.env` file.")
         else:
+            st.error("❌ Groq API Key not found in `.env`")
+            st.warning("Please add `GROQ_API_KEY=your_key_here` to the `.env` file in your project root to enable AI report generation.")
             st.warning("⚠️ No API Key configured. AI reporting will be disabled.")
             
         # 2. Visualization Options (Restored)
