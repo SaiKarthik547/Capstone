@@ -76,6 +76,11 @@ class TemperatureScaling(nn.Module):
             
             for idx, disease in enumerate(disease_names):
                 logits = logits_dict[disease]
+                
+                # If logits is a tuple (logit, log_var), extract only the logit
+                if isinstance(logits, tuple):
+                    logits = logits[0]
+                    
                 labels = labels_dict[disease].float()
                 
                 # Apply temperature scaling

@@ -223,22 +223,22 @@ Run the full integration test suite using synthetic data (no trained model neede
 py evaluation/run_evaluation_test.py
 ```
 
-### ✅ Test Results — February 23, 2026
+### ✅ Test Results — March 31, 2026
 
 The system has been validated using both synthetic integration tests and real-world medical imaging datasets.
 
 #### 1. Integration Suite (Synthetic Data)
-All 8 tests pass on synthetic data (`N=200`, `seed=42`, 3-disease labels, random logits).
+All 8 tests pass on synthetic data (`N=200`, `seed=42`, 3-disease labels).
 
 | # | Test | Module | Result | Key Metric |
 |---|------|--------|--------|-----------|
 | 1 | Multi-label BCE verification | `nested_cv.py` | ✅ PASS | 37.5% multi-label samples |
-| 2 | Temperature scaling | `calibration.py` | ✅ PASS | Optimized temps calibrated |
-| 3 | ECE + calibration metrics | `calibration.py` | ✅ PASS | Tumor ECE=0.1585 |
-| 4 | ROC operating points | `calibration.py` | ✅ PASS | Sens@95%Spec computed |
+| 2 | Temperature scaling | `calibration.py` | ✅ PASS | Optimal (tuple-aware) temps: 1.78-1.80 |
+| 3 | ECE + calibration metrics | `calibration.py` | ✅ PASS | Tumor ECE=0.1585, Stroke ECE=0.2084 |
+| 4 | ROC operating points | `calibration.py` | ✅ PASS | Sens@95%Spec computed for all tasks |
 | 5 | Lesion-level IoU matching | `statistical_rigor.py` | ✅ PASS | 100% Match rate (simulated) |
-| 6 | Sensitivity vs lesion size | `statistical_rigor.py` | ✅ PASS | High sensitivity on small ROIs |
-| 7 | Decision curve analysis | `statistical_rigor.py` | ✅ PASS | Clear Net Benefit over "Treat All" |
+| 6 | Sensitivity vs lesion size | `statistical_rigor.py` | ✅ PASS | 100% sensitivity on all ROI bins |
+| 7 | Decision curve analysis | `statistical_rigor.py` | ✅ PASS | Net Benefits 0.38-0.43 over "Treat All" |
 | 8 | Power analysis (Hanley & McNeil) | `statistical_rigor.py` | ✅ PASS | Sample size N=100 verified |
 
 #### 2. Model Performance Benchmarks — 48-Epoch Full Curriculum

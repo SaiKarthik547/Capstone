@@ -72,17 +72,20 @@ class _FakeDataset:
     def __len__(self): return N
     def __getitem__(self, i):
         return {
-            "tumor_presence":     torch.tensor([self.tumor[i]]),
-            "stroke_presence":    torch.tensor([self.stroke[i]]),
-            "alzheimer_presence": torch.tensor([self.alzheimer[i]]),
+            "presence": {
+                "tumor":     torch.tensor([self.tumor[i]]),
+                "stroke":    torch.tensor([self.stroke[i]]),
+                "alzheimer": torch.tensor([self.alzheimer[i]]),
+            }
         }
 
 class _FakeModel:
-    """Minimal model stub exposing presence_heads and seg_decoders."""
-    class _DictLike:
-        def keys(self): return ["tumor", "stroke"]
-    presence_heads = _DictLike()
-    seg_decoders   = _DictLike()
+    """Minimal model stub with direct attributes for alignment."""
+    tumor_presence = True
+    stroke_presence = True
+    alz_encoder = True
+    tumor_decoder = True
+    stroke_decoder = True
 
 def test_multilabel():
     ds = _FakeDataset()
@@ -104,11 +107,17 @@ print("="*60)
 
 def test_temperature_scaling():
     ts = TemperatureScaling(num_diseases=3)
-    temps = ts.fit(logits_dict, labels_dict, DISEASE_NAMES)
+    # Simulate (logit, log_var) tuples from the presence heads
+    t_logits_dict = {
+        "tumor":     (logits_dict["tumor"], torch.randn(N)),
+        "stroke":    (logits_dict["stroke"], torch.randn(N)),
+        "alzheimer": (logits_dict["alzheimer"], torch.randn(N))
+    }
+    temps = ts.fit(t_logits_dict, labels_dict, DISEASE_NAMES)
     assert set(temps.keys()) == set(DISEASE_NAMES), "Missing disease in temperatures"
     for d, t in temps.items():
         assert t > 0, f"Temperature must be > 0, got {t} for {d}"
-    print(f"    Optimal temps: { {d: round(t,3) for d,t in temps.items()} }")
+    print(f"    Optimal (tuple-aware) temps: { {d: round(t,3) for d,t in temps.items()} }")
 
 run("Temperature scaling", test_temperature_scaling)
 

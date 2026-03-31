@@ -11,7 +11,7 @@ This directory contains the rejection-proof evaluation system for NeuroX.
 - Patient-level bootstrap confidence intervals
 
 ### `calibration.py`
-- Temperature scaling for probability calibration
+- Uncertainty-aware temperature scaling (logit/log-variance compatible)
 - Brier score + Expected Calibration Error (ECE)
 - Reliability diagrams (calibration curves)
 - ROC operating points (Sens@95%Spec, Spec@95%Sens)
@@ -43,13 +43,22 @@ from evaluation.run_evaluation import NeuroXEvaluationPipeline
 pipeline = NeuroXEvaluationPipeline(output_dir="./evaluation_results")
 
 # Run phases
+# Phase 1: Verify nested multi-label presence keys
 pipeline.run_phase1_verification(model, dataset)
+
+# Phase 2: True nested CV (extracting logits from (logit, log_var) tuples)
 results = pipeline.run_phase2_nested_cv(model_class, dataset, hyperparams, train_fn, eval_fn)
+
+# Phase 3: Uncertainty-aware calibration
 calib = pipeline.run_phase3_calibration(logits_dict, labels_dict)
+
+# Phase 4: Clinical operating points
 thresh = pipeline.run_phase4_thresholds(labels_dict, calib['calibrated_probs'])
+
+# Phase 7: Decision Curve Analysis (Clinical Utility)
 dca = pipeline.run_phase7_decision_curves(labels_dict, calib['calibrated_probs'])
 
-# Generate report
+# Generate rejection-proof final report
 pipeline.generate_final_report()
 ```
 
@@ -93,5 +102,5 @@ All methods are based on peer-reviewed literature:
 
 ✅ **Statistical Reviewers:** Nested CV, patient-level bootstrap, power analysis  
 ✅ **Clinical Reviewers:** Decision curves, operating points, lesion-level metrics  
-✅ **Methodological Reviewers:** Ablation studies, calibration justification  
-✅ **Reproducibility Reviewers:** Frozen external validation, explicit framing
+✅ **Methodological Reviewers:** Ablation studies, uncertainty calibration justification  
+✅ **Reproducibility Reviewers:** Frozen external validation, explicit framing, deterministic mode

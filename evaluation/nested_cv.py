@@ -60,9 +60,9 @@ def verify_multi_label_training(model: nn.Module, dataset) -> dict:
         sample = dataset[i]
         
         labels = {
-            "tumor": sample["tumor_presence"].item(),
-            "stroke": sample["stroke_presence"].item(),
-            "alzheimer": sample["alzheimer_presence"].item()
+            "tumor": sample["presence"]["tumor"].item(),
+            "stroke": sample["presence"]["stroke"].item(),
+            "alzheimer": sample["presence"]["alzheimer"].item()
         }
         
         # Count positive labels
@@ -96,8 +96,16 @@ def verify_multi_label_training(model: nn.Module, dataset) -> dict:
     
     # Check 2: Verify model architecture
     print(f"\n✅ Model Architecture Check:")
-    print(f"   Presence heads: {list(model.presence_heads.keys())}")
-    print(f"   Segmentation decoders: {list(model.seg_decoders.keys())}")
+    heads = []
+    if hasattr(model, "tumor_presence"): heads.append("tumor")
+    if hasattr(model, "stroke_presence"): heads.append("stroke")
+    if hasattr(model, "alz_encoder"): heads.append("alzheimer")
+    print(f"   Detected heads: {heads}")
+    
+    decs = []
+    if hasattr(model, "tumor_decoder"): decs.append("tumor")
+    if hasattr(model, "stroke_decoder"): decs.append("stroke")
+    print(f"   Detected decoders: {decs}")
     
     # Check 3: Verify loss function (will be checked in training loop)
     print(f"\n✅ Loss Function Requirement:")
@@ -155,9 +163,9 @@ class NestedCrossValidation:
         for i in range(len(dataset)):
             sample = dataset[i]
             y_multilabel.append([
-                sample["tumor_presence"].item(),
-                sample["stroke_presence"].item(),
-                sample["alzheimer_presence"].item()
+                sample["presence"]["tumor"].item(),
+                sample["presence"]["stroke"].item(),
+                sample["presence"]["alzheimer"].item()
             ])
         
         return np.array(y_multilabel)
