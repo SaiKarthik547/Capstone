@@ -293,171 +293,96 @@ All 8 tests pass on synthetic data (`N=200`, `seed=42`, 3-disease labels).
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️ Neural Architecture (NeuroX-v3)
 
-### 🧠 Class Diagram — NeuroX Architecture
+The system utilizes a dual-path asymmetric architecture designed for high-fidelity segmentation and uncertainty-aware clinical classification.
 
 ```mermaid
-classDiagram
-    direction TB
+graph TD
+    %% ── Style Definitions ──────────────────────────────────────────────────
+    classDef input fill:#f5f5f5,stroke:#333,stroke-width:2px;
+    classDef module fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef layer fill:#fff,stroke:#333,stroke-width:1px;
+    classDef skip stroke:#fbc02d,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
 
-    %% ── Primitive Building Blocks ──────────────────────────────────────────
+    %% ── Input Layer ────────────────────────────────────────────────────────
+    Input([Input Volume: B × 2 × 96 × 96 × 96]):::input
+    Input -->|Ch0: Alz Preprocessed| AlzEngine
+    Input -->|Ch1: Standard Preprocessed| SharedBackbone
 
-    class ResBlock3D {
-        +in_ch : int
-        +out_ch : int
-        +conv : Sequential
-        +   Conv3d(in_ch→out_ch, 3, pad=1, bias=False)
-        +   InstanceNorm3d(out_ch)
-        +   ReLU(inplace=True)
-        +   Conv3d(out_ch→out_ch, 3, pad=1, bias=False)
-        +   InstanceNorm3d(out_ch)
-        +skip : Conv3d(1×1) or Identity
-        +relu : ReLU(inplace=True)
-        +forward(x) Tensor : relu(conv(x) + skip(x))
-    }
+    subgraph SharedBackbone ["Shared Backbone (Tumor & Stroke)"]
+        direction TB
+        SharedEnc["SharedEncoder (3D-UNet Encoder)"]
+        SharedEnc --> EncStage1["Stage 1: Conv-IN-ReLU x2 (32 feat | 96³)"]
+        EncStage1 --> Pool1["MaxPool3d (Stride 2)"]
+        Pool1 --> EncStage2["Stage 2: Conv-IN-ReLU x2 (64 feat | 48³)"]
+        EncStage2 --> Pool2["MaxPool3d (Stride 2)"]
+        Pool2 --> EncStage3["Stage 3: Conv-IN-ReLU x2 (128 feat | 24³)"]
+        EncStage3 --> Pool3["MaxPool3d (Stride 2)"]
+        
+        subgraph TransformerBottleneck ["Transformer Bottleneck (12³ tokens)"]
+            direction TB
+            Pool3 --> ReshapeIn["Flatten to Seq (1728 x 128)"]
+            ReshapeIn --> MHA["Multi-Head Attention (8 heads | depth 4)"]
+            MHA --> FFN["Feed-Forward (GELU | MLP-256)"]
+            FFN --> ReshapeOut["Reshape to 3D (B x 128 x 12³ )"]
+        end
+    end
 
-    class SEBlock {
-        +channels : int
-        +reduction : int = 16
-        +pool : AdaptiveAvgPool3d(1)
-        +fc : Sequential
-        +   Linear(ch→ch/16) → ReLU → Linear(ch/16→ch) → Sigmoid
-        +forward(x) Tensor : x × fc(pool(x))
-    }
+    subgraph SegDecoder ["Segmentation Decoder (ROI Reconstructor)"]
+        direction TB
+        ReshapeOut --> Up3["Up-Sample 3 (12³ → 24³)"]
+        Up3 --> Att3["Attention Gate 3 (Skip @ 24³)"]
+        Att3 --> Dec3["ConvBlock 3 (256 → 128)"]
+        
+        Dec3 --> Up2["Up-Sample 2 (24³ → 48³)"]
+        Up2 --> Att2["Attention Gate 2 (Skip @ 48³)"]
+        Att2 --> Dec2["ConvBlock 2 (128 → 64)"]
+        
+        Dec2 --> Up1["Up-Sample 1 (48³ → 96³)"]
+        Up1 --> Att1["Attention Gate 1 (Skip @ 96³)"]
+        Att1 --> Dec1["ConvBlock 1 (64 → 32)"]
+        
+        Dec1 --> SegHead["Output Head (Conv3d 1x1x1)"]
+    end
 
-    class AttentionGate3D {
-        +gate_ch : int
-        +skip_ch : int
-        +inter_ch : int
-        +W_gate : Conv3d(gate_ch→inter_ch, 1)
-        +W_skip : Conv3d(skip_ch→inter_ch, 1)
-        +psi : Conv3d(inter_ch→1, 1)
-        +relu : ReLU(inplace=True)
-        +sigmoid : Sigmoid
-        +forward(gate, skip) Tensor
-        +   psi = ReLU(W_gate(gate) + W_skip(skip))
-        +   return skip × Sigmoid(psi(psi))
-    }
+    %% Skip Connections
+    EncStage1 -.->|enc1 skip| Att1:::skip
+    EncStage2 -.->|enc2 skip| Att2:::skip
+    EncStage3 -.->|enc3 skip| Att3:::skip
 
-    class TransformerBottleneck3D {
-        +dim : int = 128
-        +depth : int = 4
-        +heads : int = 8
-        +mlp_dim : int = 256
-        +dropout : float = 0.2
-        +layers : ModuleList[depth ×]
-        +   LayerNorm(128) + MHA(128,8heads,dropout=0.2)
-        +   LayerNorm(128) + FFN[Linear(128→256),GELU,Dropout,Linear(256→128),Dropout]
-        +forward(x B×128×12×12×12) Tensor
-        +   reshape→1728 tokens, pre-norm, residual, reshape back
-        +   OOM guard: skip if tokens>2000
-    }
+    subgraph PresenceEngine ["Presence & Uncertainty Heads"]
+        direction TB
+        ReshapeOut --> GlobalPool["Global Avg Pool"]
+        GlobalPool --> FC1["Hidden Layer (64)"]
+        FC1 --> tumor_presence["Tumor Head (logit, log_var)"]
+        FC1 --> stroke_presence["Stroke Head (logit, log_var)"]
+    end
 
-    %% ── Shared Encoder ────────────────────────────────────────────────────
+    subgraph AlzEngine ["Alzheimer Engine (Independent ResNet-SE)"]
+        direction TB
+        AlzRes1["ResBlock 1 (32 | 48³ )"] --> AlzRes2["ResBlock 2 (64 | 24³ )"]
+        AlzRes2 --> AlzRes3["ResBlock 3 (128 | 12³ )"]
+        AlzRes3 --> AlzRes4["ResBlock 4 (256 | 12³ )"]
+        AlzRes4 --> SE["SE-Attention Block"]
+        SE --> AlzFlatten["Feature Concat (Avg+Max)"]
+        AlzFlatten --> alz_encoder["AD Classifier (512 → 1)"]
+        AlzFlatten --> alz_uncertainty["Log-Var Head (Uncertainty)"]
+    end
 
-    class SharedEncoder {
-        +in_channels : int = 2 ← T1ce + FLAIR dual channel
-        +enc1 : Sequential [Conv3d 2→32, IN3d(affine), ReLU, Conv3d, IN3d, ReLU]
-        +pool1 : MaxPool3d(2)
-        +enc2 : Sequential [Conv3d 32→64, IN3d(affine), ReLU, Conv3d, IN3d, ReLU]
-        +pool2 : MaxPool3d(2)
-        +enc3 : Sequential [Conv3d 64→128, IN3d(affine), ReLU, Conv3d, IN3d, ReLU]
-        +pool3 : MaxPool3d(2)
-        +forward(x) Dict
-        +   e1 = enc1(x)                → B×32×96×96×96
-        +   e2 = enc2(pool1(e1))        → B×64×48×48×48
-        +   e3 = enc3(pool2(e2))        → B×128×24×24×24
-        +   b  = pool3(e3)              → B×128×12×12×12
-        +   return (enc1, enc2, enc3, bottleneck_input)
-    }
+    subgraph ClinicalFusion ["Clinical Decision Engine"]
+        direction TB
+        DecisionFeats["Metadata: [prob, unc, vol, entropy, conf]"] --> DecisionMLP["DecisionHead (32 → 1)"]
+    end
 
-    %% ── Task Heads ─────────────────────────────────────────────────────────
-
-    class PresenceHead {
-        +in_features : int = 128
-        +pool : AdaptiveAvgPool3d(1)
-        +flatten : Flatten
-        +fc1 : Linear(128→64)
-        +relu : ReLU
-        +dropout : Dropout(p=0.2)
-        +fc2 : Linear(64→2)
-        +forward(bottleneck) Tuple[logit, log_var]
-        +   out = fc2(dropout(relu(fc1(pool(x)))))
-        +   return out[:,0:1], out[:,1:2]
-        +MC-Dropout: 10 stochastic passes at inference
-    }
-
-    class SegmentationDecoder {
-        +name : str (tumor or stroke)
-        +output_channels : int (3 for tumor, 1 for stroke)
-        +up3 : ConvTranspose3d(128→128, k=2, s=2)  12³→24³
-        +att3 : AttentionGate3D(128, 128, 64)
-        +dec3 : ConvBlock(256→128) with IN3d(affine)
-        +up2 : ConvTranspose3d(128→64, k=2, s=2)   24³→48³
-        +att2 : AttentionGate3D(64, 64, 32)
-        +dec2 : ConvBlock(128→64) with IN3d(affine)
-        +up1 : ConvTranspose3d(64→32, k=2, s=2)    48³→96³
-        +att1 : AttentionGate3D(32, 32, 16)
-        +dec1 : ConvBlock(64→32) with IN3d(affine)
-        +output_head : Conv3d(32→C, 1)
-        +forward(enc_features, bottleneck_features) Tensor
-    }
-
-    class AlzheimerEncoder {
-        +note: FULLY INDEPENDENT — zero shared params with SharedEncoder
-        +in_channels : 1 ← single-channel raw MRI (z-score + ±3σ clip)
-        +block1 : ResBlock3D(1→32) + MaxPool3d(2)   → B×32×48×48×48
-        +block2 : ResBlock3D(32→64) + MaxPool3d(2)  → B×64×24×24×24
-        +block3 : ResBlock3D(64→128) + MaxPool3d(2) → B×128×12×12×12
-        +block4 : ResBlock3D(128→256)               → B×256×12×12×12
-        +se : SEBlock(256, reduction=16)
-        +avg_pool : AdaptiveAvgPool3d(1)
-        +max_pool : AdaptiveMaxPool3d(1)
-        +norm : LayerNorm(512)
-        +classifier : Sequential
-        +   Linear(512→256) → GELU → Dropout(0.3)
-        +   Linear(256→128) → GELU → Dropout(0.2) → Linear(128→1)
-        +log_var_head : Sequential [Linear(512→64)→ReLU→Linear(64→1)]
-        +   ← TRUE separate variance branch (Kendall & Gal 2017)
-        +forward(x) Tuple[logit, log_var]
-        +MC-Dropout: 10 stochastic passes at inference
-    }
-
-    %% ── Top-Level Model ────────────────────────────────────────────────────
-
-    class NeuroXMultiDisease {
-        +encoder : SharedEncoder
-        +bottleneck : TransformerBottleneck3D(dim=128,depth=4,heads=8,mlp=256)
-        +presence_heads : ModuleDict
-        +   tumor  : PresenceHead(128)
-        +   stroke : PresenceHead(128)
-        +seg_decoders : ModuleDict
-        +   tumor  : SegmentationDecoder(output_channels=3)
-        +   stroke : SegmentationDecoder(output_channels=1)
-        +alz_encoder : AlzheimerEncoder
-        +forward(x, active_presence, active_seg) Dict
-        +   enc_out = encoder(x)
-        +   btl = bottleneck(enc_out.bottleneck_input)
-        +   per active task → run head(btl) or decoder(enc_out,btl)
-        +   alz: alz_encoder(x) [single channel slice x[:,0:1,:]]
-    }
-
-    %% ── Relationships ──────────────────────────────────────────────────────
-
-    NeuroXMultiDisease *-- SharedEncoder               : encoder
-    NeuroXMultiDisease *-- TransformerBottleneck3D     : bottleneck
-    NeuroXMultiDisease *-- "2" PresenceHead            : presence_heads
-    NeuroXMultiDisease *-- "2" SegmentationDecoder     : seg_decoders
-    NeuroXMultiDisease *-- AlzheimerEncoder            : alz_encoder
-
-    SharedEncoder ..> InstanceNorm3d                   : all conv blocks use IN3d(affine=True)
-
-    SegmentationDecoder *-- "3" AttentionGate3D        : att1 att2 att3
-    SegmentationDecoder ..> InstanceNorm3d             : all dec blocks use IN3d(affine=True)
-
-    AlzheimerEncoder *-- "4" ResBlock3D                : block1 block2 block3 block4
-    AlzheimerEncoder *-- SEBlock                       : se(256)
+    %% Final Outputs
+    SegHead --> output_masks([Diagnostic Mask Volumes]):::output
+    tumor_presence --> report([Report Engine]):::output
+    stroke_presence --> report
+    alz_encoder --> report
+    DecisionMLP --> report
+    alz_uncertainty --> report
 ```
 
 ---

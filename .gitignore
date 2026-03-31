@@ -40,6 +40,8 @@ ENV/
 *.pth
 *.nii
 *.nii.gz
+*.npz
+*.obj
 !assets/**/*.nii
 !assets/**/*.nii.gz
 neurox_multihead_final.pth
