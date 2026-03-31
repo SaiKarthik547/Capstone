@@ -369,7 +369,7 @@ classDiagram
         +   e2 = enc2(pool1(e1))        → B×64×48×48×48
         +   e3 = enc3(pool2(e2))        → B×128×24×24×24
         +   b  = pool3(e3)              → B×128×12×12×12
-        +   return {enc1,enc2,enc3,bottleneck_input}
+        +   return (enc1, enc2, enc3, bottleneck_input)
     }
 
     %% ── Task Heads ─────────────────────────────────────────────────────────
