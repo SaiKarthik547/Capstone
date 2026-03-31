@@ -1,7 +1,9 @@
 import os
+from dotenv import load_dotenv
 import sys
+
+
 import io
-import base64
 import tempfile
 import traceback
 import subprocess
@@ -20,21 +22,20 @@ from scipy.ndimage import (binary_closing, binary_fill_holes, distance_transform
                            gaussian_filter, label as cc_label, binary_dilation as scipy_binary_dilation, zoom)
 from scipy import ndimage
 from skimage import measure
-import trimesh
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 import streamlit as st
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors as rl_colors
 from reportlab.lib.units import inch
-from dotenv import load_dotenv
 
-# Load Environment Variables (.env)
+
+# Load environment variables from .env file
 load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Groq AI Integration
 try:
@@ -43,10 +44,6 @@ try:
 except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
-
-# HD-BET for Medical-Grade Brain Extraction (CLI-BASED)
-# Using CLI interface (official, stable) instead of Python imports (unreliable)
-import subprocess
 
 # HD-BET availability will be checked once at app startup (in session state)
 HDBET_AVAILABLE = None  # Will be set in run_streamlit_app()
@@ -497,7 +494,10 @@ def load_model(model_path: str = MODEL_PATH):
       - Legacy format: plain state_dict
     """
     model = NeuroXMultiDisease().to(DEVICE)
+    metrics = {}
+    
     if os.path.exists(model_path):
+        state_dict = None
         try:
             checkpoint = torch.load(model_path, map_location=DEVICE)
             
@@ -505,42 +505,38 @@ def load_model(model_path: str = MODEL_PATH):
             if isinstance(checkpoint, dict):
                 if "model_state" in checkpoint:
                     state_dict = checkpoint["model_state"]
-                    st.session_state.training_metrics = checkpoint.get("metrics", {})
+                    metrics = checkpoint.get("metrics", {})
                 elif "model" in checkpoint:
                     state_dict = checkpoint["model"]
-                    st.session_state.training_metrics = checkpoint.get("metrics", {})
+                    metrics = checkpoint.get("metrics", {})
                 else:
                     state_dict = checkpoint
-                    st.session_state.training_metrics = {}
+                    metrics = {}
             else:
                 state_dict = checkpoint
-                st.session_state.training_metrics = {}
+                metrics = {}
             
             # 2. Strict loading - any mismatch will raise error (guarantees parity)
             model.load_state_dict(state_dict, strict=True)
             model.eval()
             print("✅ Model loaded successfully with strict=True parity.")
             
-            # Optional: Populate metrics metadata
-            if st.session_state.training_metrics:
-                n_epochs = len(st.session_state.training_metrics.get("epoch", []))
-                print(f"📈 Loaded metrics history for {n_epochs} epochs.")
-                
-            return model
+            return model, metrics
             
         except Exception as e:
             st.error(f"⚠️ Architecture Mismatch: {e}")
             print(f"❌ Error loading model: {e}")
             # Fallback to non-strict if desperate, but warn user
             try:
-                model.load_state_dict(state_dict, strict=False)
+                if state_dict is not None:
+                    model.load_state_dict(state_dict, strict=False)
                 model.eval()
-                return model
+                return model, metrics
             except:
-                return model
+                return model, metrics
     else:
         st.warning(f"⚠️ Model file not found: {model_path}")
-        return None
+        return None, {}
 
 
 def preprocess_alz_light(volume: np.ndarray) -> torch.Tensor:
@@ -637,12 +633,16 @@ def compute_lesion_metrics(mask, brain_mask, spacing=(1.0, 1.0, 1.0), prob=0.0, 
         mask = (mask.max(axis=0) > 0).astype(np.uint8)
     mask = (mask > 0).astype(np.uint8)
 
-    if brain_mask is not None and brain_mask.ndim > 3:
-        brain_mask = (brain_mask.max(axis=0) > 0).astype(np.uint8)
+    # FIX: Harden against empty/None brain mask
+    if brain_mask is not None:
+        if brain_mask.ndim > 3:
+            brain_mask = (brain_mask.max(axis=0) > 0).astype(np.uint8)
+        brain_voxels = np.sum(brain_mask > 0)
+    else:
+        brain_voxels = 0
 
     # --- 1. Volume ---
     lesion_voxels = np.sum(mask > 0)
-    brain_voxels = np.sum(brain_mask > 0)
     voxel_volume = spacing[0] * spacing[1] * spacing[2]
     lesion_volume = lesion_voxels * voxel_volume
 
@@ -696,13 +696,18 @@ def compute_lesion_metrics(mask, brain_mask, spacing=(1.0, 1.0, 1.0), prob=0.0, 
     # --- 4. Depth from surface ---
     lesion_depth = np.array([]) # Fix 11: Initialize before try
     try:
-        from scipy.ndimage import distance_transform_edt
-        dist_map = distance_transform_edt(brain_mask)
-        lesion_depth = dist_map[mask > 0]
-        if len(lesion_depth) > 0:
-            metrics["depth_min"] = float(lesion_depth.min())
-            metrics["depth_mean"] = float(lesion_depth.mean())
-            metrics["depth_max"] = float(lesion_depth.max())
+        if brain_mask is not None:
+            from scipy.ndimage import distance_transform_edt
+            dist_map = distance_transform_edt(brain_mask)
+            lesion_depth = dist_map[mask > 0]
+            if len(lesion_depth) > 0:
+                metrics["depth_min"] = float(lesion_depth.min())
+                metrics["depth_mean"] = float(lesion_depth.mean())
+                metrics["depth_max"] = float(lesion_depth.max())
+            else:
+                metrics["depth_min"] = metrics["depth_mean"] = metrics["depth_max"] = 0.0
+        else:
+            metrics["depth_min"] = metrics["depth_mean"] = metrics["depth_max"] = 0.0
     except:
         metrics["depth_min"] = metrics["depth_mean"] = metrics["depth_max"] = 0.0
 
@@ -722,6 +727,11 @@ def compute_lesion_metrics(mask, brain_mask, spacing=(1.0, 1.0, 1.0), prob=0.0, 
     metrics["margin"] = abs(float(prob) - 0.5)
     metrics["adjusted_score"] = float(prob) * metrics["confidence"]
     metrics["logit_strength"] = abs(float(logit))
+    
+    # 7. Metadata parity for Analysis UI (prevent 0.0 for non-Alzheimer)
+    metrics["entropy"] = 0.0  # Placeholder (Lesions are spatial, entropy less common here)
+    metrics["consistency"] = metrics["confidence"] # Proximity to confidence in lesion analytics
+    
     return metrics
 
 
@@ -773,62 +783,6 @@ def compute_alzheimer_metrics(prob, uncertainty, logit):
     })
 
     return metrics
-
-
-def apply_multi_label_detection(presence_logits: Dict[str, float], threshold: float = 0.5) -> Dict:
-    """Apply multi-label disease detection with independent probabilities.
-    
-    CRITICAL CORRECTION: Diseases are NOT mutually exclusive.
-    One patient can have tumor AND stroke AND Alzheimer's simultaneously.
-    
-    Uses sigmoid (NOT softmax) for independent binary classification per disease.
-    This matches the BCEWithLogitsLoss training objective.
-    
-    Args:
-        presence_logits: Raw logits from presence heads {disease: logit_value}
-        threshold: Detection threshold (default: 0.5)
-    
-    Returns:
-        Dict containing:
-            - disease_probabilities: Independent sigmoid probabilities (can sum to >1.0)
-            - detected_diseases: List of all diseases above threshold
-            - detection_confidence: Dict of confidence per detected disease
-            - all_probabilities: All disease probabilities for reference
-    """
-    import torch
-    
-    disease_names = ["tumor", "stroke", "alzheimer"]
-    
-    # Apply sigmoid independently to each disease (multi-label)
-    disease_probs = {}
-    for disease in disease_names:
-        logit = presence_logits[disease]
-        # Sigmoid for independent binary classification
-        prob = float(torch.sigmoid(torch.tensor(logit, dtype=torch.float32)).item())
-        disease_probs[disease] = prob
-    
-    # RELAXED DETECTION FOR DECISION HEAD PROCESSING
-    # Keep everything that has non-trivial signal so DecisionHead can reject later
-    # 0.5 strict bound is abandoned!
-    detected_diseases = [
-        disease for disease, prob in disease_probs.items()
-        if prob > 0.01 
-    ]
-    
-    # Confidence for detected diseases
-    detection_confidence = {
-        disease: disease_probs[disease]
-        for disease in detected_diseases
-    }
-    
-    return {
-        "disease_probabilities": disease_probs,
-        "detected_diseases": detected_diseases,
-        "detection_confidence": detection_confidence,
-        "all_probabilities": disease_probs,
-        "threshold_used": threshold,
-        "multi_label": True  # Flag indicating multi-label classification
-    }
 
 
 def automatic_disease_detection_dual(model, image_tensor: torch.Tensor):
@@ -1045,13 +999,14 @@ def validate_alignment(segmentation_mask: np.ndarray, brain_mask: np.ndarray) ->
 
 def resize_to_exact_shape(volume: np.ndarray, target_shape: Tuple) -> np.ndarray:
     """Resize volume to exact target shape via padding/cropping."""
+    assert len(target_shape) == 3, f"resize_to_exact_shape expects 3D shape, got {len(target_shape)}"
     current_shape = np.array(volume.shape)
-    target_shape = np.array(target_shape)
+    target_shape_arr = np.array(target_shape)
     
     result = volume.copy()
     
     for axis in range(3):
-        diff = target_shape[axis] - current_shape[axis]
+        diff = target_shape_arr[axis] - current_shape[axis]
         if diff > 0:
             # Pad
             pad_width = [(0, 0)] * 3
@@ -1060,7 +1015,7 @@ def resize_to_exact_shape(volume: np.ndarray, target_shape: Tuple) -> np.ndarray
         elif diff < 0:
             # Crop
             slices = [slice(None)] * 3
-            slices[axis] = slice(0, target_shape[axis])
+            slices[axis] = slice(0, target_shape_arr[axis])
             result = result[tuple(slices)]
     
     return result
@@ -1068,7 +1023,7 @@ def resize_to_exact_shape(volume: np.ndarray, target_shape: Tuple) -> np.ndarray
 
 def largest_connected_component(mask: np.ndarray) -> np.ndarray:
     """Extract largest connected component from binary mask."""
-    labeled, num_features = scipy_label(mask)
+    labeled, num_features = cc_label(mask)
     if num_features == 0:
         return mask
     
@@ -1604,7 +1559,7 @@ def get_visualization_assets(
     
     try:
         # Load local model weight copy for mesh alignment verification
-        local_model = load_model(model_path)
+        local_model, _ = load_model(model_path)
         
         # PRIMARY ASSET: Interactive solid-mesh patient reconstructio
         fig_patient = create_3d_visualization(
@@ -2127,7 +2082,7 @@ def create_3d_visualization(
     
     # Layout with medical disclaimers
     # FIX: Dynamic Camera pinning to brain center
-    brain_center = brain_verts.mean(axis=0) if 'brain_verts' in locals() else [0,0,0]
+    brain_center = brain_verts.mean(axis=0) if (brain_verts is not None) else [0, 0, 0]
     
     fig.update_layout(
         scene=dict(
@@ -2238,7 +2193,7 @@ def generate_matplotlib_heatmap_png(
         size=original_shape,
         mode='trilinear',
         align_corners=False
-    ).squeeze().numpy()  # shape: original_shape
+    ).numpy()[0, 0]  # Shape: (D, H, W) - ensures no over-squeezing on 2D inputs
 
     # --- 4. Pick representative slices (center of mass of high-prob region) ---
     threshold_mask = p_original > 0.3
@@ -2550,7 +2505,7 @@ def render_paper_report(report_text: str):
 # AI REPORT GENERATION (GROQ)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def generate_ai_report(detection: Dict, segmentations: Dict, lesion_metrics: Dict, groq_api_key: Optional[str] = None) -> str:
+def generate_ai_report(detection: Dict, segmentations: Dict, lesion_metrics: Dict, groq_api_key: Optional[str] = None, language: str = "English") -> str:
     """
     High-Fidelity AI Radiology Report Generation.
     
@@ -2597,21 +2552,47 @@ def generate_ai_report(detection: Dict, segmentations: Dict, lesion_metrics: Dic
 
         context_summary = "\n".join(context_data) if context_data else "No significant imaging patterns detected."
 
+        # Language-Specific Personas and Style Guides
+        STYLE_GUIDE = {
+            "English": """
+            - TONALITY: Standard Neuroradiology Consultant.
+            - TARGET: General medical practitioners.
+            - VOCABULARY: Balanced professional terms.
+            - GOAL: High-fidelity clinical summary.
+            """,
+            "Medical Terminology": """
+            - TONALITY: Senior Research Academic / Neuro-oncology Specialist.
+            - TARGET: Specialists (Neurologists, Neurosurgeons).
+            - VOCABULARY: Advanced (e.g., T1-hypointensity with perilesional vasemic signatures, midline shift measurements, mass effect).
+            - GOAL: Exhaustive technical classification.
+            """,
+            "Simplified": """
+            - TONALITY: Patient-Centric Communicator.
+            - TARGET: Non-medical patients and family.
+            - VOCABULARY: Layperson (e.g., instead of 'perilesional edema', use 'swelling around the area').
+            - GOAL: Clarify findings and explain next steps without jargon.
+            """
+        }
+        
+        style_instruction = STYLE_GUIDE.get(language, STYLE_GUIDE["English"])
+        
         # The Perfect Clinical Prompt (Expert Persona v2)
         prompt = f"""
 SYSTEM ROLE: You are an expert Board-Certified Senior Neuroradiologist interpreting high-resolution structural MRI (T1, T2, FLAIR).
+STYLE GUIDE FOR THIS SESSION:
+{style_instruction}
 
 INPUT DATA (QUANTITATIVE SIGNATURES):
 {context_summary}
 
 TASK:
-Generate a formal, structured neuroradiology report. Your objective is to synthesize raw metrics (mL, mm, coordinates) into a clinical narrative. 
+Generate a formal, structured report in {language} as per the STYLE GUIDE. Your objective is to synthesize raw metrics (mL, mm, coordinates) into a clinical narrative. 
 
 MANDATORY STRUCTURE:
 You MUST use these exact headers (including Roman Numerals) for each section:
 
 I. CLINICAL FINDINGS:
-Itemized anatomical observations. Use professional terminology (vasogenic edema, mass effect, cytotoxic edema, medial temporal atrophy).
+Itemized anatomical observations. Use descriptors based on the TARGET profile in the style guide.
 
 II. LOCALIZED ANALYTICAL MEASUREMENTS:
 A bulleted summary of ALL quantitative metrics. You MUST list every volumetric measurement (mL), voxel count, and RAS coordinate provided in the input here, even if you already mentioned them in the findings.
@@ -2624,7 +2605,7 @@ A final qualitative clinical synthesis based on ALL above findings.
 
 CRITICAL CONSTRAINTS:
 - YOU MUST SEPARATE FINDINGS FROM MEASUREMENTS. Do not only put metrics in the findings prose.
-- Use Radiologist-level HEDGING ("Suggestive of", "Consistent with").
+- Use Radiologist-level HEDGING ("Suggestive of", "Consistent with") for medical versions; use clear explanations for Simplified.
 - RESEARCH USE ONLY: Cite that these are automated findings based on the NeuroX DL-pipeline.
 - Max 500 words.
 """
@@ -2692,83 +2673,6 @@ def generate_fallback_report(detection: Dict, segmentations: Dict) -> str:
     report += "**RESEARCH AND EDUCATIONAL USE ONLY - NOT FOR CLINICAL DIAGNOSIS**\n"
     return report
 
-
-def create_pdf_report(detection: Dict, segmentations: Dict, report_text: str, output_path: str):
-    """Generate PDF report with visualizations"""
-    try:
-        doc = SimpleDocTemplate(output_path, pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = []
-        
-        # Title
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=24,
-            textColor=rl_colors.HexColor('#00E5FF'),
-            spaceAfter=30
-        )
-        story.append(Paragraph("🧠 NeuroX Analysis Report", title_style))
-        story.append(Spacer(1, 12))
-        
-        # Metadata
-        story.append(Paragraph(f"<b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-        story.append(Paragraph("<b>System:</b> NeuroX Multi-Disease Detection", styles['Normal']))
-        story.append(Spacer(1, 20))
-        
-        # Warning
-        warning_style = ParagraphStyle(
-            'Warning',
-            parent=styles['Normal'],
-            textColor=rl_colors.HexColor('#FF8800'),
-            fontSize=10
-        )
-        story.append(Paragraph("⚠️ RESEARCH AND EDUCATIONAL USE ONLY - NOT FOR CLINICAL DIAGNOSIS", warning_style))
-        story.append(Spacer(1, 20))
-        
-        # Detection table
-        probs = detection["probabilities"]
-        detected = detection["detected_diseases"]
-        
-        table_data = [["Disease", "Confidence", "Status"]]
-        for disease in ["tumor", "stroke", "alzheimer"]:
-            disease_cfg = DISEASE_COLORS.get(disease, {"name": disease})
-            name = disease_cfg["name"]
-            prob = f"{probs[disease]:.1%}"
-            status = "DETECTED" if disease in detected else "Not detected"
-            table_data.append([name, prob, status])
-        
-        table = Table(table_data)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#00E5FF')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), rl_colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, rl_colors.black)
-        ]))
-        story.append(table)
-        story.append(Spacer(1, 20))
-        
-        # Report text
-        for line in report_text.split('\n'):
-            if line.strip():
-                if line.startswith('#'):
-                    line = line.replace('#', '').strip()
-                    story.append(Paragraph(f"<b>{line}</b>", styles['Heading2']))
-                else:
-                    story.append(Paragraph(line, styles['Normal']))
-                story.append(Spacer(1, 6))
-        
-        doc.build(story)
-        return True
-    except Exception as e:
-        st.error(f"PDF generation failed: {e}")
-        return False
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # STREAMLIT UI - PREMIUM DESIGN
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2780,7 +2684,7 @@ def run_streamlit_app():
         page_title="NeuroX Adaptive",
         page_icon="🧠",
         layout="wide",
-        initial_sidebar_state="expanded"  # Sidebar open by default
+        initial_sidebar_state="collapsed"  # FIX: Match CSS Display:None to avoid flash
     )
     
     # Optimized Premium CSS
@@ -3089,8 +2993,6 @@ def run_streamlit_app():
     # GLOBAL SETTINGS STATE (Initialize defaults)
     if 'show_atlas' not in st.session_state:
         st.session_state.show_atlas = True
-    if 'show_heatmap' not in st.session_state:
-        st.session_state.show_heatmap = False
     
     # HD-BET AVAILABILITY CHECK (RUNS ONLY ONCE AT STARTUP)
     if 'hdbet_available' not in st.session_state:
@@ -3234,7 +3136,8 @@ def run_streamlit_app():
                     
                     try:
                         with st.spinner("🧠 Loading AI model..."):
-                            model = load_model()
+                            model, training_metrics = load_model()
+                            st.session_state.training_metrics = training_metrics
                         
                         if model:
                             with st.spinner("🔬 Analyzing brain scan..."):
@@ -3750,7 +3653,7 @@ def run_streamlit_app():
             print("="*60 + "\n")
             
             # Load model once for Decision Head evaluation
-            model = load_model()
+            model, _ = load_model()
 
             # ITERATE THROUGH EACH DETECTED DISEASE FOR SEPARATE VISUALIZATION
             detected_diseases = [d for d in st.session_state.detection_results["detected_diseases"] 
@@ -4003,19 +3906,18 @@ def run_streamlit_app():
             
             with col2:
                 if st.button("✨ GENERATE REPORT", use_container_width=True):
-                    # Prioritize Environment Variable GROQ_API_KEY
-                    api_key = os.getenv("GROQ_API_KEY", None)
-                    
-                    if not api_key:
-                        st.warning("⚠️ No Groq API Key found in .env file. Using fallback template.")
-                    
+                    # Generate AI report using global GROQ_API_KEY
                     with st.spinner("✍️ Generating AI report..."):
                         st.session_state.report_text = generate_ai_report(
                             st.session_state.detection_results,
                             st.session_state.segmentation_results,
                             st.session_state.get('lesion_metrics', {}),
-                            api_key
+                            GROQ_API_KEY,  # Use global env-loaded key
+                            language=report_lang
                         )
+                        # Clear PDF cache when report text changes
+                        if 'pdf_report_cache' in st.session_state:
+                            del st.session_state.pdf_report_cache
             
             if st.session_state.report_text:
                 st.markdown("---")
@@ -4027,26 +3929,30 @@ def run_streamlit_app():
                 col1, col2, col3 = st.columns([2, 1, 1])
                 
                 with col2:
-                    if st.button("💾 SAVE TEXT", use_container_width=True):
-                        st.download_button(
-                            "Download TXT",
-                            st.session_state.report_text,
-                            file_name=f"neurox_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                            mime="text/plain"
-                        )
+                    st.download_button(
+                        "💾 DOWNLOAD TEXT",
+                        st.session_state.report_text,
+                        file_name=f"neurox_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
                 
                 with col3:
-                    # High-Fidelity PDF Export
-                    pdf_bytes = generate_pdf_report(
-                        st.session_state.report_text,
-                        st.session_state.detection_results,
-                        st.session_state.get('lesion_metrics', {})
-                    )
+                    # High-Fidelity PDF Export (Cached to prevent expensive re-renders)
+                    if 'pdf_report_cache' not in st.session_state:
+                        with st.spinner("📄 Preparing PDF..."):
+                            st.session_state.pdf_report_cache = generate_pdf_report(
+                                st.session_state.report_text,
+                                st.session_state.detection_results,
+                                st.session_state.get('lesion_metrics', {})
+                            )
+                    
                     st.download_button(
                         "📄 EXPORT PDF",
-                        pdf_bytes,
+                        st.session_state.pdf_report_cache,
                         file_name=f"neurox_clinical_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf"
+                        mime="application/pdf",
+                        use_container_width=True
                     )
         else:
             st.info("No detection results available. Complete analysis first.")
@@ -4058,19 +3964,25 @@ def run_streamlit_app():
         
         st.markdown("""
         <div class="glass-card">
-            <h3 style="color: #00E5FF; margin-bottom: 10px;">🤖 Groq AI Integration</h3>
-            <p style="color: #94A3B8; font-size: 13px;">AI radiology reporting is powered by Groq.</p>
+            <h3 style="color: #00E5FF; margin-bottom: 10px;">🔑 API Configuration</h3>
+            <p style="color: #94A3B8; font-size: 13px;">Configure external AI services for enhanced reporting.</p>
         </div>
         """, unsafe_allow_html=True)
         
-        env_key = os.getenv("GROQ_API_KEY")
-        if env_key:
-            st.success(f"✅ Securely connected via `.env` (Key: {env_key[:4]}...{env_key[-4:]})")
-            st.info("💡 Your API key is loaded from the environment. To update it, modify the `GROQ_API_KEY` entry in your project's `.env` file.")
+        if GROQ_API_KEY and GROQ_AVAILABLE:
+            st.success(f"✅ Groq AI Configuration: ACTIVE (Loaded from environment)")
+            st.caption(f"Medical Insight Token: {GROQ_API_KEY[:8]}...{GROQ_API_KEY[-4:]}")
         else:
-            st.error("❌ Groq API Key not found in `.env`")
-            st.warning("Please add `GROQ_API_KEY=your_key_here` to the `.env` file in your project root to enable AI report generation.")
-            st.warning("⚠️ No API Key configured. AI reporting will be disabled.")
+            st.error("❌ Groq AI Configuration: INACTIVE")
+            st.markdown("""
+            ### 🛠️ Configuration Required
+            To enable professional AI-generated clinical reports, ensure your Groq API key is present in the environment file (`.env`):
+            
+            ```env
+            GROQ_API_KEY=gsk_your_key_here
+            ```
+            *System will automatically detect the key upon file update.*
+            """)
             
         # 2. Visualization Options (Restored)
         st.markdown("---")
@@ -4081,11 +3993,9 @@ def run_streamlit_app():
         </div>
         """, unsafe_allow_html=True)
         
-        col_v1, col_v3 = st.columns(2)
+        col_v1, _ = st.columns(2)
         with col_v1:
             st.session_state.show_atlas = st.checkbox("Show Patient-Specific Brain (HD-BET)", value=st.session_state.show_atlas)
-        with col_v3:
-            st.session_state.show_heatmap = st.checkbox("Show Probability Heatmap", value=st.session_state.show_heatmap)
 
         # 3. Detection Config (Restored)
         st.markdown("---")
