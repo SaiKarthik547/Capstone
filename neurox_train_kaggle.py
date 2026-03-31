@@ -7,21 +7,31 @@ import nibabel as nib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from tqdm.auto import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
-    roc_auc_score, precision_score, recall_score, f1_score, accuracy_score,
+    roc_auc_score, average_precision_score, brier_score_loss,
+    precision_score, recall_score, f1_score, accuracy_score,
     roc_curve
 )
 from collections import Counter
 import pandas as pd
+from scipy.spatial.distance import cdist
+import json # Fix 1: Top-level json import for safety
+import shutil # Fix 1: Top-level shutil import for cache flushing
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  0. GLOBAL SAFETY CHECKS
+#  0. GLOBAL SAFETY CHECKS & UTILS
 # ═══════════════════════════════════════════════════════════════════════════
+def validate_tensor(x, name):
+    """Hard Fail System (Section D): Ensure no NaNs or non-finite values."""
+    if torch.isnan(x).any():
+        raise RuntimeError(f"❌ HARD FAIL: {name} contains NaNs")
+    if not torch.isfinite(x).all():
+        raise RuntimeError(f"❌ HARD FAIL: {name} contains non-finite values")
+
 print("="*80)
 print("🔍 GLOBAL SAFETY CHECKS")
 print(f"CUDA Available: {torch.cuda.is_available()}")
@@ -37,32 +47,50 @@ SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
 BATCH_SIZE = 1
-NUM_WORKERS = 2         
+ACCUM_STEPS = 4
+NUM_WORKERS = 1        
 WEIGHT_DECAY = 1e-5
-EPOCHS = 80          # Optimized 80-epoch curriculum
-USE_AMP = True       # AMP enabled for memory efficiency and speed
+EPOCHS = 48         
+USE_AMP = True       
+RESUME_PATH = "/kaggle/input/models/muntasaikarthik/26epchckp/other/default/1/neurox_last (1).pth"   # Manual resume path (e.g., /kaggle/input/weights/neurox_last.pth)
 
-# Multi-task loss weights (Final Balanced Setting)
-LAMBDA_TUMOR  = 1.5
-LAMBDA_STROKE = 1.5
-LAMBDA_CLS    = 2.0
+# Section A: DETERMINISTIC ROOTS
+TUMOR_ROOT  = Path(os.environ.get("TUMOR_ROOT", "/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation"))
+STROKE_ROOT = Path(os.environ.get("STROKE_ROOT", "/kaggle/input/datasets/orvile/isles-2022-brain-stoke-dataset/ISLES-2022/ISLES-2022"))
+# Section A: DUAL ALZHEIMER ROOTS (Alz A: Preprocessed, Alz B: Raw/Sorted)
+ALZ_A_ROOT  = Path(os.environ.get("ALZ_A_ROOT", "/kaggle/input/datasets/summaiyamahmood/adni-preprocessed"))
+ALZ_B_ROOT  = Path(os.environ.get("ALZ_B_ROOT", "/kaggle/input/datasets/summaiyamahmood/adni-677-sorted"))
+# Section A: Extra Tumor Roots (BraTS 2021 Optimization)
+TUMOR_ROOT_2021 = Path(os.environ.get("TUMOR_ROOT_2021", "/tmp/brats2021"))
+
+# Multi-task loss weights (Section B: task Dominance Control)
+# L_total = 1.0 * L_alz + 0.7 * L_tumor + 0.7 * L_stroke
+# Applied to prevent segmentation from dominating the shared encoder gradients.
+LAMBDA_TUMOR  = 0.7
+LAMBDA_STROKE = 0.7
+LAMBDA_CLS    = 1.0
+
+# Section B: PHASE-AWARE CURRICULUM
+# Format: {upper_epoch_limit: (TRAIN_ALZ, TRAIN_SEG)}
+PHASE_CONFIG = {
+    10:  (True,  False),  # Phase 1: ALZ warmup (ep 1-6)
+    26: (False, True),   # Phase 2: SEG warmup (ep 7-26, step-capped)
+    48: (True,  True)    # Phase 3: Joint training (ep 27-31)
+}
 
 CHECKPOINT_DIR = Path("./checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-# Dynamic weights will be set in main()
-STROKE_POS_WEIGHT = None 
-ALZ_POS_WEIGHT = None
-
-# Cache dir for resized volumes
+# Cache setup (Section C)
+CACHE_VERSION = "v7_2ch_flair"
 CACHE_DIR = Path("/kaggle/working/cache")
-CACHE_DIR.mkdir(exist_ok=True, parents=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+print(f"📦 Using persistent cache ({CACHE_VERSION}) at {CACHE_DIR}")
 
 # DEBUG MODE
-DEBUG = False  # Set True for quick pipeline check (20 samples, 3 epochs)
-
+DEBUG = False  
 if DEBUG:
-    print("🔬 DEBUG MODE ENABLED: Training restricted to 20 samples/dataset, 3 epochs.")
+    print("🔬 DEBUG MODE ENABLED: 3 epochs, restricted datasets.")
     EPOCHS = 3
 
 def set_seed(seed: int):
@@ -83,32 +111,73 @@ def load_nifti(path: Path) -> np.ndarray:
         data = img.get_fdata()
         return np.asarray(data, dtype=np.float32)
     except Exception as e:
-        print(f"Error loading {path}: {e}")
-        return np.zeros(ROI_SIZE, dtype=np.float32)
+        raise RuntimeError(f"Failed to load NIfTI: {path} | Error: {e}")
 
-def preprocess_volume(volume: np.ndarray, is_mask: bool = False) -> torch.Tensor:
-    """Unified deterministic preprocessing."""
-    volume = volume.astype(np.float32)
-    
-    if not is_mask:
-        mean = volume.mean()
-        std = volume.std() + 1e-8
-        volume = (volume - mean) / std
-    
-    volume = torch.from_numpy(volume)
+def resize_volume(volume: torch.Tensor, is_mask: bool) -> torch.Tensor:
+    """Helper: Resize to ROI_SIZE with appropriate interpolation."""
     if volume.ndim == 3:
         volume = volume.unsqueeze(0).unsqueeze(0)
     elif volume.ndim == 4:
         volume = volume.unsqueeze(0)
         
-    volume = F.interpolate(
+    resized = F.interpolate(
         volume,
         size=ROI_SIZE,
         mode="nearest" if is_mask else "trilinear",
         align_corners=None if is_mask else False
     )
+    return resized.squeeze(0).float()
+
+def universal_preprocess(volume: np.ndarray, is_mask: bool = False) -> torch.Tensor:
+    """Unified robust preprocessing for Tumor and Stroke."""
+    volume = volume.astype(np.float32)
+    orig_sum = volume.sum()
     
-    return volume.squeeze(0)  # [C=1, D, H, W]
+    if not is_mask:
+        p1, p99 = np.percentile(volume, (1, 99))
+        volume = np.clip(volume, p1, p99)
+        volume = (volume - p1) / (p99 - p1 + 1e-8)
+        mean, std = volume.mean(), volume.std() + 1e-8
+        volume = (volume - mean) / std
+    
+    vol_tensor = torch.from_numpy(volume).float()
+    res_tensor = resize_volume(vol_tensor, is_mask).float()
+    
+    validate_tensor(res_tensor, "Preprocessed Volume")
+    return res_tensor
+
+def preprocess_alz(volume: np.ndarray, dataset_type: str) -> torch.Tensor:
+    """Section B: Alzheimer Preprocessing (STRICT DETERMINISTIC PIPELINE)"""
+    volume = volume.astype(np.float32)
+    
+    # Domain A: Unified Normalization (Fix 3)
+    # Force z-score for network stability regardless of source dataset type
+    mean, std = volume.mean(), volume.std() + 1e-8
+    volume = (volume - mean) / std
+    
+    vol_tensor = torch.from_numpy(volume).float()
+    res_tensor = resize_volume(vol_tensor, is_mask=False).float()
+    validate_tensor(res_tensor, f"Alzheimer Volume ({dataset_type})")
+    return res_tensor
+
+def preprocess_alz_light(volume: np.ndarray) -> torch.Tensor:
+    """Part 1: Light Alzheimer pipeline (separated from segmentation path).
+
+    Uses pure z-score (no percentile clip) to preserve hippocampal contrast
+    gradients, then soft-clips ±3σ to remove outliers without compressing
+    mid-range signal. ROI size is identical (96³) — zero cache format break.
+    """
+    volume = volume.astype(np.float32)
+    mean = volume.mean()
+    std  = volume.std() + 1e-6
+    volume = (volume - mean) / std
+    volume = np.clip(volume, -3.0, 3.0)
+    vol_t  = torch.from_numpy(volume).float().unsqueeze(0).unsqueeze(0)
+    vol_t  = F.interpolate(vol_t, size=ROI_SIZE, mode="trilinear", align_corners=False)
+    result = vol_t.squeeze(0)
+    validate_tensor(result, "Alzheimer Light Preprocess")
+    return result
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  3. DATASETS
@@ -131,43 +200,77 @@ class TumorDataset(Dataset):
         print(f"✅ Tumor Dataset: {len(self.cases)} cases")
 
     def _find_cases(self):
+        """Deep recursive finder — works regardless of nesting depth or wrapper folders.
+        
+        Strategy: rglob for ALL *_t1ce.nii* files anywhere under root, then locate
+        the matching *_seg.nii* in the same directory. This handles:
+          - BraTS20_Training_XXX/file.nii.gz  (standard)
+          - wrapper/BraTS20_Training_XXX/file.nii.gz  (Kaggle extra nesting)
+          - Datasets where folder name ≠ BraTS pattern but files follow naming convention
+        """
         cases = []
-        for case_dir in self.root.rglob("BraTS20_Training_*"):
-            if not case_dir.is_dir(): continue
-            t1ce = list(case_dir.glob("*_t1ce.nii*"))
-            seg = list(case_dir.glob("*_seg.nii*"))
-            if t1ce and seg:
-                cases.append({"t1ce": t1ce[0], "seg": seg[0]})
+        seen_dirs = set()
+        # rglob finds t1ce files at ANY depth
+        for t1ce_file in self.root.rglob("*_t1ce.nii*"):
+            if not t1ce_file.is_file() or t1ce_file.stat().st_size < 1024:
+                continue
+            parent = t1ce_file.parent
+            if parent in seen_dirs:
+                continue
+            seen_dirs.add(parent)
+            seg_candidates = [f for f in parent.glob("*_seg.nii*") if f.stat().st_size > 1024]
+            # 🧩 Domain B: FLAIR Matching
+            flair_candidates = [f for f in parent.glob("*_flair.nii*") if f.stat().st_size > 1024]
+            
+            if seg_candidates and flair_candidates:
+                cases.append({"t1ce": t1ce_file, "flair": flair_candidates[0], "seg": seg_candidates[0]})
+            elif seg_candidates:
+                cases.append({"t1ce": t1ce_file, "flair": None, "seg": seg_candidates[0]})
+        
+        if not cases:
+            print(f"  ⚠️  TumorDataset: No t1ce+seg pairs found (size > 1KB) under {self.root}")
         return cases
     
     def __len__(self): return len(self.cases)
     
     def __getitem__(self, idx):
         case = self.cases[idx]
-        cache_key = CACHE_DIR / f"tumor_{idx}.npz"
-        
-        # STEP 7: Load from cache if available
+        # Section C: SAFE CACHE (v7 torch-native)
+        cache_key = CACHE_DIR / f"{Path(case['t1ce']).stem}_{CACHE_VERSION}.pt"
         if cache_key.exists():
-            data = np.load(cache_key)
-            image = torch.from_numpy(data["image"])
-            target = torch.from_numpy(data["target"])
+            try:
+                data = torch.load(cache_key, weights_only=True)
+                image, target = data["image"], data["target"]
+                # Verify shape handles 1 or 2 channels (Domain B)
+                if image.shape[1:] != ROI_SIZE or image.shape[0] not in (1, 2) or target.shape != (3, *ROI_SIZE) or torch.isnan(image).any():
+                    raise ValueError("Shape mismatch")
+                return {"image": image, "seg": target, "presence": {"tumor": torch.tensor([1.0])}, "has_label": {"tumor": torch.tensor([1.0])}, "path": str(case['t1ce'])}
+            except Exception:
+                cache_key.unlink(missing_ok=True)
+        
+        # Loading Modalities (T1ce + FLAIR)
+        img_t1ce = universal_preprocess(load_nifti(case["t1ce"]), is_mask=False)
+        if case.get("flair") and case["flair"] is not None and Path(case["flair"]).exists():
+            img_flair = universal_preprocess(load_nifti(case["flair"]), is_mask=False)
+            image = torch.cat([img_t1ce, img_flair], dim=0)   # shape (2, 96, 96, 96)
         else:
-            img = load_nifti(case["t1ce"])
-            image = preprocess_volume(img, is_mask=False)
+            image = torch.cat([img_t1ce, img_t1ce], dim=0)    # fallback: duplicate channel
             
-            seg_vol = load_nifti(case["seg"])
-            seg = preprocess_volume(seg_vol, is_mask=True)
-            seg = seg.round()
-            
-            # Independent binary masks (mutually exclusive)
-            # BraTS Labels: 1=NCR/NET, 2=ED, 4=ET
-            seg_et  = (seg == 4.0).float()   
-            seg_ncr = (seg == 1.0).float()   
-            seg_ed  = (seg == 2.0).float()   
-            
-            target = torch.cat([seg_et, seg_ncr, seg_ed], dim=0)  # [3, 96, 96, 96]
-            
-            np.savez_compressed(cache_key, image=image.numpy(), target=target.numpy())
+        seg_vol = load_nifti(case["seg"])
+        seg = universal_preprocess(seg_vol, is_mask=True).round()
+        
+        # BraTS Labels: 1=NCR, 2=ED, 4=ET
+        seg_et  = (seg == 4.0).float()   
+        seg_ncr = (seg == 1.0).float()   
+        seg_ed  = (seg == 2.0).float()   
+        target = torch.cat([seg_et, seg_ncr, seg_ed], dim=0) 
+        
+        # Save to cache with disk-safe guard (Change 16)
+        try:
+            if shutil.disk_usage(str(CACHE_DIR)).free > 5 * 1024**3:
+                torch.save({"image": image, "target": target}, cache_key)
+        except Exception:
+            pass
         
         has_tumor = 1.0 if target.sum() > 0 else 0.0
         
@@ -175,12 +278,22 @@ class TumorDataset(Dataset):
             "image": image,
             "seg": target,
             "has_seg": torch.tensor([1.0]),
+            "path": str(case["t1ce"]), # Fix: Added path for spacing extraction
             "presence": {
                 "tumor": torch.tensor([has_tumor]),
                 "stroke": torch.tensor([0.0]),
                 "alzheimer": torch.tensor([0.0])
+            },
+            "has_label": {
+                "tumor": torch.tensor([1.0]),
+                "stroke": torch.tensor([0.0]),
+                "alzheimer": torch.tensor([0.0])
             }
         }
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  3. DATASET ADAPTERS (SECTION 3 REFACTORED)
+# ═══════════════════════════════════════════════════════════════════════════
 
 class StrokeDataset(Dataset):
     """ISLES 2022: DWI/ADC Input -> Binary Mask Target"""
@@ -193,55 +306,90 @@ class StrokeDataset(Dataset):
         print(f"✅ Stroke Dataset: {len(self.cases)} cases")
 
     def _find_cases(self):
+        """Flexible deep finder for ISLES-2022 structure at any nesting depth.
+        
+        Probes for sub-strokecase* directories recursively so it works whether
+        the dataset is mounted as:
+          root/ISLES-2022/ISLES-2022/sub-strokecase.../  (standard)
+          root/sub-strokecase.../                         (flat)
+          root/extra_wrapper/ISLES-2022/...               (Kaggle variant)
+        """
         cases = []
-        base = self.root / "ISLES-2022" / "ISLES-2022"
-        for sub_dir in base.glob("sub-strokecase*"):
-            dwi_dir = sub_dir / "ses-0001" / "dwi"
-            if not dwi_dir.exists(): continue
-            
-            # Recursive search, filter empty files
-            dwi_candidates = list(dwi_dir.rglob("*.nii*"))
-            valid_dwi = [f for f in dwi_candidates if f.is_file() and f.stat().st_size > 1024]
-            
-            if not valid_dwi:
-                continue
+        
+        # Find all subject directories named sub-strokecase* anywhere under root
+        all_stroke_dirs = list(self.root.rglob("sub-strokecase*"))
+        subject_dirs = [d for d in all_stroke_dirs if d.is_dir()]
+        
+        if not subject_dirs:
+            print(f"  ⚠️  StrokeDataset: No sub-strokecase* dirs found under {self.root}")
+            all_nii = list(self.root.rglob("*.nii*"))[:5]
+            for f in all_nii:
+                print(f"      Found: {f}")
+            return cases
 
-            msk_dir = base / "derivatives" / sub_dir.name / "ses-0001"
-            if not msk_dir.exists(): continue
+        for sub_dir in subject_dirs:
+            # Find ADC image: search recursively within this subject directory
+            adc_candidates = [
+                f for f in sub_dir.rglob("*.nii*")
+                if "adc" in f.name.lower() and f.is_file() and f.stat().st_size > 1024
+            ]
+            if not adc_candidates:
+                continue
             
-            msk_candidates = list(msk_dir.rglob("*.nii*"))
-            valid_msk = [f for f in msk_candidates if f.is_file() and "msk" in f.name and f.stat().st_size > 1024]
+            # Find mask: look for msk file — could be in derivatives sibling or within subject dir
+            # Strategy 1: derivatives/<subject>/ses-*/msk
+            subj_name = sub_dir.name
+            # Walk up to find the dataset root (parent of sub-strokecase siblings)
+            dataset_root = sub_dir.parent
+            # Try standard derivatives path
+            deriv_search = list((dataset_root / "derivatives" / subj_name).rglob("*msk*.nii*"))
+            if not deriv_search:
+                # Try looking anywhere in dataset root derivatives
+                deriv_search = list(dataset_root.rglob(f"*{subj_name}*msk*.nii*"))
+            if not deriv_search:
+                # Last resort: any msk file co-located with the adc file
+                deriv_search = list(adc_candidates[0].parent.rglob("*msk*.nii*"))
             
-            if valid_dwi and valid_msk:
-                # Prefer ADC file
-                dwi_path = next((f for f in valid_dwi if "adc" in f.name.lower()), None)
-                if dwi_path is None:
-                    dwi_path = max(valid_dwi, key=lambda x: x.stat().st_size)
-                cases.append({"dwi": dwi_path, "msk": valid_msk[0]})
+            valid_msk = [f for f in deriv_search if f.is_file() and f.stat().st_size > 1024]
+            if not valid_msk:
+                continue
+            
+            cases.append({"adc": adc_candidates[0], "msk": valid_msk[0]})
+        
         return cases
 
     def __len__(self): return len(self.cases)
 
     def __getitem__(self, idx):
         case = self.cases[idx]
-        cache_key = CACHE_DIR / f"stroke_{idx}.npz"
-        
+        # Section C: SAFE CACHE (v7 torch-native)
+        cache_key = CACHE_DIR / f"{Path(case['adc']).stem}_{CACHE_VERSION}.pt"
         if cache_key.exists():
-            data = np.load(cache_key)
-            image = torch.from_numpy(data["image"])
-            target = torch.from_numpy(data["target"])
-        else:
-            vol_img = load_nifti(case["dwi"])
-            vol_msk = load_nifti(case["msk"])
+            try:
+                data = torch.load(cache_key, weights_only=True)
+                image, target = data["image"], data["target"]
+                if image.shape[1:] != ROI_SIZE or image.shape[0] not in (1, 2) or torch.isnan(image).any():
+                    raise ValueError("Shape mismatch")
+                return {"image": image, "seg": target, "has_seg": torch.tensor([1.0]), "path": str(case["adc"]), "presence": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([1.0]), "alzheimer": torch.tensor([0.0])}, "has_label": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([1.0]), "alzheimer": torch.tensor([0.0])}}
+            except Exception:
+                cache_key.unlink(missing_ok=True)
+        
+        # 🧩 Domain B: 2-Channel Stroke (DWI/ADC Duplicated for Encoder Compatibility)
+        vol_img = load_nifti(case["adc"])
+        vol_msk = load_nifti(case["msk"])
+        
+        img_base = universal_preprocess(vol_img, is_mask=False)
+        image = torch.cat([img_base, img_base], dim=0) # shape (2, 96, 96, 96)
+        
+        mask = universal_preprocess(vol_msk, is_mask=True)
+        target = (mask > 0).float()
             
-            # Strict alignment check
-            assert vol_img.shape == vol_msk.shape, f"Stroke shape mismatch: {vol_img.shape} vs {vol_msk.shape}"
-
-            image = preprocess_volume(vol_img, is_mask=False)
-            mask = preprocess_volume(vol_msk, is_mask=True)
-            target = (mask > 0).float()
-            
-            np.savez_compressed(cache_key, image=image.numpy(), target=target.numpy())
+        # Save to cache with disk-safe guard
+        try:
+            if shutil.disk_usage(str(CACHE_DIR)).free > 5 * 1024**3:
+                torch.save({"image": image, "target": target}, cache_key)
+        except Exception:
+            pass
         
         has_stroke = 1.0 if target.sum() > 0 else 0.0
         
@@ -249,108 +397,218 @@ class StrokeDataset(Dataset):
             "image": image,
             "seg": target,
             "has_seg": torch.tensor([1.0]),
+            "path": str(case["adc"]), # Fix: Added path for spacing extraction
             "presence": {
                 "tumor": torch.tensor([0.0]),
                 "stroke": torch.tensor([has_stroke]),
                 "alzheimer": torch.tensor([0.0])
+            },
+            "has_label": {
+                "tumor": torch.tensor([0.0]),
+                "stroke": torch.tensor([1.0]),
+                "alzheimer": torch.tensor([0.0])
             }
         }
 
+import hashlib as _hashlib
+
 class AlzheimerDataset(Dataset):
-    def __init__(self, records, augment=False):
-        self.records = records
-        self.augment = augment
+    """Alzheimer dataset with caching and per-dataset normalization.
+
+    dataset_type='preprocessed' (Dataset A: ADNI preprocessed)
+        Pipeline: z-score via preprocess_volume → resize to ROI_SIZE.
+    dataset_type='sorted' (Dataset B: ADNI sorted / raw scanner)
+        Pipeline: percentile clip [p1,p99] → [0,1] → [-1,1] → resize ONLY.
+        preprocess_volume z-score is intentionally SKIPPED to avoid
+        double-normalization cancelling the robust scaling (ISSUE 2).
+
+    Cache keys are MD5(file_path)[:8] — stable across dataset reordering (ISSUE 3).
+    """
+    def __init__(self, records, dataset_type="preprocessed", augment=False):
+        self.records      = records
+        self.dataset_type = dataset_type
+        self.augment      = augment
+        # Part 5: Local cache version — invalidates ONLY alz .npz files.
+        # Tumor/stroke .pt caches use CACHE_VERSION (v7_2ch_flair) and are untouched.
+        ALZ_CACHE_V  = "v8_alz_light"
+        self._cache_pfx = f"alz_A_{ALZ_CACHE_V}" if dataset_type == "preprocessed" else f"alz_B_{ALZ_CACHE_V}"
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, idx):
         record = self.records[idx]
-        vol = load_nifti(record["path"])
-        image = preprocess_volume(vol, is_mask=False)
+
+        # ISSUE 3 FIX: path-hash cache key — stable even if dataset order changes
+        path_hash = _hashlib.md5(record["path"].encode()).hexdigest()[:8]
+        cache_key = CACHE_DIR / f"{self._cache_pfx}_{path_hash}.npz"
+
+        # Section C: SAFE CACHE (v4)
+        if cache_key.exists():
+            try:
+                data  = np.load(cache_key)
+                image = torch.from_numpy(data["image"])
+                if image.shape != (1, *ROI_SIZE) or torch.isnan(image).any():
+                    raise ValueError("Corrupt cache")
+            except Exception:
+                cache_key.unlink(missing_ok=True)
+                return self.__getitem__(idx)
+        else:
+            vol = load_nifti(record["path"])
+            # Part 2: Light pipeline separation — replaces shared preprocessing
+            image = preprocess_alz_light(vol)
+
+            _tmp = str(cache_key) + ".tmp.npz"
+            np.savez_compressed(_tmp, image=image.numpy())
+            os.replace(_tmp, cache_key)  
 
         if self.augment:
             if random.random() < 0.5:
                 image = torch.flip(image, [2])
             if random.random() < 0.5:
                 image = torch.flip(image, [3])
+            # G1: Gaussian noise + intensity scaling (post-cache, never pollutes cache)
+            if random.random() < 0.3:
+                image = image + torch.randn_like(image) * 0.05
+            if random.random() < 0.3:
+                image = image * random.uniform(0.9, 1.1)
 
         return {
             "image": image,
             "seg": torch.zeros((1, *ROI_SIZE)),
             "has_seg": torch.tensor([0.0]),
             "presence": {
-                "tumor": torch.tensor([0.0]),
-                "stroke": torch.tensor([0.0]),
+                "tumor":     torch.tensor([0.0]),
+                "stroke":    torch.tensor([0.0]),
                 "alzheimer": torch.tensor([float(record["label"])])
+            },
+            "has_label": {
+                "tumor":     torch.tensor([0.0]),
+                "stroke":    torch.tensor([0.0]),
+                "alzheimer": torch.tensor([1.0])
             }
         }
 
-def build_alzheimer_subject_split(data_root, seed=42, debug=False):
+def get_adni_subject_id(path: str) -> str:
+    """Part A: Extract ADNI subject ID from path.
+    
+    Handles:
+    - Deep preprocessed structure: .../002_S_0413/... -> '002_S_0413'
+    - Flat files: 002_S_0619.nii -> '002_S_0619'
     """
-    Build AD vs CN dataset from ADNI-style folder structure.
-    Performs SUBJECT-LEVEL stratified split.
+    parts = path.replace("\\", "/").split("/")
+    # Case 1: look for folder named with ADNI pattern (XXX_S_XXXX)
+    for p in parts:
+        if "_S_" in p and len(p.split("_")) >= 3:
+            return p
+    # Case 2: flat file — use stem before first dot
+    fname = os.path.basename(path)
+    return fname.split(".")[0]
+
+def build_alzheimer_subject_split(alz_configs, seed=42, debug=False):
+    """Part A: Unified subject-level train/val split across all ADNI roots.
+    
+    Merges ALL sources BEFORE splitting to prevent subject leakage.
+    Subject ID extracted via get_adni_subject_id() to handle both
+    preprocessed (deep) and sorted (flat) dataset structures.
     """
+    from collections import defaultdict
+    class_map = {"AD": 1, "CN": 0, "MCI": 0, "EMCI": 0, "LMCI": 0}
+    all_samples = []
 
-    CN_ROOT = Path(data_root) / "ecc" / "ADNI"
-    AD_ROOT = Path(data_root) / "abb" / "ADNI"
+    for data_root_str, dataset_type in alz_configs:
+        data_root = Path(data_root_str)
+        if not data_root.exists():
+            print(f"  ⚠️  Alzheimer root skipped (not found): {data_root}")
+            continue
 
-    samples = []
+        print(f"  🔍 Scanning {dataset_type} Alzheimer dataset at {data_root.name}...")
+        class_dirs_found = [
+            c for c in data_root.rglob("*")
+            if c.is_dir() and c.name in class_map
+        ]
 
-    def collect(root, label):
-        if not root.exists():
-            print(f"⚠️ Warning: Alzheimer root {root} does not exist!")
-            return
-        for subject in os.listdir(root):
-            subject_path = root / subject
-            if not subject_path.is_dir():
-                continue
-            for path, _, files in os.walk(subject_path):
-                for f in files:
-                    # Scan for both .nii and .nii.gz for robustness
-                    if f.endswith(".nii") or f.endswith(".nii.gz"):
-                        samples.append({
-                            "subject": subject,
-                            "path": str(Path(path) / f),
-                            "label": label
-                        })
+        if not class_dirs_found:
+            print(f"  ❌ No class directories (AD/CN/MCI/EMCI/LMCI) found under {data_root}")
+            continue
 
-    collect(CN_ROOT, 0)
-    collect(AD_ROOT, 1)
+        for cls_dir in class_dirs_found:
+            label = class_map[cls_dir.name]
+            nii_files = [
+                f for f in cls_dir.rglob("*")
+                if f.is_file() and (f.suffix == ".nii" or f.name.endswith(".nii.gz"))
+            ]
+            for f in nii_files:
+                all_samples.append({
+                    "path":  str(f),
+                    "label": label,
+                    "type":  dataset_type,
+                })
 
-    if not samples:
-        print("❌ CRITICAL: No Alzheimer samples found! Check data_root paths.")
+    if not all_samples:
+        print("\u274c CRITICAL: No Alzheimer samples found across any roots.")
         return [], []
 
-    df = pd.DataFrame(samples)
+    # De-duplicate by path (handles overlapping mounts)
+    seen_paths = set()
+    deduped = []
+    for s in all_samples:
+        if s["path"] not in seen_paths:
+            seen_paths.add(s["path"])
+            deduped.append(s)
+    all_samples = deduped
 
     if debug:
-        # Reduce dataset for debug while keeping class balance approx
-        df = df.sample(n=min(200, len(df)), random_state=seed)
+        import random as _rnd
+        _rnd.shuffle(all_samples)
+        all_samples = all_samples[:min(200, len(all_samples))]
 
-    # Subject-level grouping for stratification
-    subject_df = df.groupby("subject")["label"].first().reset_index()
+    # A3: Group by subject (merge BEFORE split to prevent leakage)
+    subject_map = defaultdict(list)
+    for s in all_samples:
+        sid = get_adni_subject_id(s["path"])
+        subject_map[sid].append(s)
 
-    train_subj, val_subj = train_test_split(
-        subject_df,
-        test_size=0.2,
-        stratify=subject_df["label"],
-        random_state=seed
-    )
+    subjects = list(subject_map.keys())
 
-    train_df = df[df["subject"].isin(train_subj["subject"])]
-    val_df   = df[df["subject"].isin(val_subj["subject"])]
+    # A4: Stratify split on majority label per subject
+    subject_labels = []
+    for sid in subjects:
+        labels = [x["label"] for x in subject_map[sid]]
+        subject_labels.append(max(set(labels), key=labels.count))
 
-    print("✅ Alzheimer Subject-Level Split:")
-    print("   Train subjects:", len(train_subj))
-    print("   Val subjects:", len(val_subj))
-    print("   Train scans:", len(train_df))
-    print("   Val scans:", len(val_df))
+    try:
+        train_subj, val_subj = train_test_split(
+            subjects, test_size=0.2, stratify=subject_labels, random_state=seed
+        )
+    except Exception:
+        train_subj, val_subj = train_test_split(subjects, test_size=0.2, random_state=seed)
 
-    return train_df.to_dict("records"), val_df.to_dict("records")
+    # A6: MANDATORY leakage check
+    assert set(train_subj).isdisjoint(set(val_subj)), \
+        "CRITICAL: Subject leakage detected between train/val splits!"
+
+    # A5: Build flat sample lists
+    train_data, val_data = [], []
+    for sid in train_subj:
+        train_data.extend(subject_map[sid])
+    for sid in val_subj:
+        val_data.extend(subject_map[sid])
+
+    ad_count = sum(1 for s in all_samples if s["label"] == 1)
+    cn_count  = len(all_samples) - ad_count
+    print(f"✅ Alzheimer Multi-Source Split Summary:")
+    print(f"   {len(train_subj)} train subjects / {len(val_subj)} val subjects")
+    print(f"   AD={ad_count} CN={cn_count} total scans: {len(all_samples)}")
+    print(f"   train={len(train_data)} val={len(val_data)}")
+
+    # A: Rename 'path' key to match what AlzheimerDataset expects (uses record['path'])
+    # Already using 'path' — safe.
+    return train_data, val_data
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  4. MODEL ARCHITECTURE
+#  4. MODEL ARCHITECTUREand
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TransformerBottleneck3D(nn.Module):
@@ -371,6 +629,13 @@ class TransformerBottleneck3D(nn.Module):
     
     def forward(self, x):
         b, c, d, h, w = x.shape
+        n_tokens = d * h * w
+        # Part C: OOM guard with visibility warning
+        if n_tokens > 2000:
+            print(f"[WARN] Transformer skipped: tokens={n_tokens} (limit=2000) — returning identity")
+            return x
+        
+        # x shape: (b, c, d, h, w) -> (b, d*h*w, c)
         x = x.view(b, c, -1).permute(0, 2, 1)
         for ln1, attn, ln2, ff in self.layers:
             attn_out, _ = attn(ln1(x), ln1(x), ln1(x))
@@ -380,7 +645,7 @@ class TransformerBottleneck3D(nn.Module):
 
 
 class SharedEncoder(nn.Module):
-    def __init__(self, in_channels=1):
+    def __init__(self, in_channels=2):
         super().__init__()
         self.enc1 = self._conv_block(in_channels, 32)
         self.pool1 = nn.MaxPool3d(2)
@@ -388,8 +653,7 @@ class SharedEncoder(nn.Module):
         self.pool2 = nn.MaxPool3d(2)
         self.enc3 = self._conv_block(64, 128)
         self.pool3 = nn.MaxPool3d(2)
-        # 3D Transformer bottleneck
-        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.2)
+        # 3D Transformer bottleneck (removed from here, now in NeuroXMultiDisease)
     
     def _conv_block(self, in_c, out_c):
         """InstanceNorm3d for batch_size=1 stability."""
@@ -403,18 +667,16 @@ class SharedEncoder(nn.Module):
         )
     
     def forward(self, x):
-        # Handle 2-channel input gracefully (safety)
-        if x.shape[1] == 2:
-            x = x.mean(dim=1, keepdim=True)
+        # 🧩 Domain B: 2-Channel Input (T1ce + FLAIR) - Preservation of discriminative signal.
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         e3 = self.enc3(self.pool2(e2))
-        b = self.bottleneck(self.pool3(e3))
-        return {"enc1": e1, "enc2": e2, "enc3": e3, "bottleneck": b}
+        b = self.pool3(e3) # Bottleneck input before transformer
+        return {"enc1": e1, "enc2": e2, "enc3": e3, "bottleneck_input": b}
 
 
 class PresenceHead(nn.Module):
-    """Binary presence detector with MC Dropout uncertainty."""
+    """Binary presence detector with Heteroscedastic Uncertainty."""
     def __init__(self, in_features=128):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool3d(1)
@@ -422,7 +684,7 @@ class PresenceHead(nn.Module):
         self.fc1 = nn.Linear(in_features, 64)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.2)
-        self.fc2 = nn.Linear(64, 1)
+        self.fc2 = nn.Linear(64, 2)  # [logit, log_var]
     
     def forward(self, bottleneck_features):
         x = self.pool(bottleneck_features)
@@ -430,8 +692,8 @@ class PresenceHead(nn.Module):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+        out = self.fc2(x)
+        return out[:, 0:1], out[:, 1:2]
 
 
 class AttentionGate3D(nn.Module):
@@ -484,8 +746,9 @@ class SegmentationDecoder(nn.Module):
             nn.ReLU(inplace=True),
         )
     
-    def forward(self, enc_features):
-        e1, e2, e3, b = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"], enc_features["bottleneck"]
+    def forward(self, enc_features, bottleneck_features):
+        e1, e2, e3 = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"]
+        b = bottleneck_features # This is the output of the TransformerBottleneck3D
         u3 = self.up3(b)
         d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
         
@@ -535,16 +798,21 @@ class ResBlock3D(nn.Module):
 
 
 class AlzheimerEncoder(nn.Module):
-    """AlzheimerEncoder v2: Deep Residual + SE Attention.
+    """AlzheimerEncoder v3: Deep Residual + SE Attention, CLEAN binary output.
+    
+    FIX: Removed pseudo-heteroscedastic dual-output head. The old design used
+    Linear(128, 2) and split output as [logit, log_var], but output[:, 1] is
+    just a 2nd raw logit — not a variance — creating conflicting gradient signals
+    that prevent learning (Kendall & Gal 2017 requires separate variance branch).
+    Now outputs a single binary logit + a TRUE separate log_var head.
     
     Structure:
         1 -> 32 (ResBlock) -> Pool
         32 -> 64 (ResBlock) -> Pool
         64 -> 128 (ResBlock) -> Pool
         128 -> 256 (ResBlock) -> SE Attention
-        
-    Global Modeling: 12x12x12 features with channel attention.
-    Classifier: 512 in (Avg+Max concat) -> 256 -> Dropout(0.2) -> 1
+    Classifier: 512 in (Avg+Max concat) -> LayerNorm -> 256 -> Dropout(0.3) -> 1 logit
+    Log-var head: 512 -> 64 -> 1 (separate branch, no gradient into logit)
     """
     def __init__(self):
         super().__init__()
@@ -565,13 +833,22 @@ class AlzheimerEncoder(nn.Module):
 
         self.norm = nn.LayerNorm(512)
 
+        # CLEAN single-output classifier (binary AD/CN)
         self.classifier = nn.Sequential(
             nn.Linear(512, 256),
             nn.GELU(),
+            nn.Dropout(0.3),   # Slightly higher dropout for 3D MRI classification
             nn.Linear(256, 128),
             nn.GELU(),
-            nn.Dropout(0.2), 
-            nn.Linear(128, 1)
+            nn.Dropout(0.2),
+            nn.Linear(128, 1)  # Single logit output
+        )
+        
+        # TRUE separate log-variance head (detached from classification pathway)
+        self.log_var_head = nn.Sequential(
+            nn.Linear(512, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
         )
 
     def forward(self, x):
@@ -587,8 +864,34 @@ class AlzheimerEncoder(nn.Module):
         feat = torch.cat([avg, mx], dim=1)
         feat = self.norm(feat)
 
-        return self.classifier(feat)
+        logit   = self.classifier(feat)
+        log_var = self.log_var_head(feat)
+        return logit, log_var
 
+    def extract_features(self, x):
+        """B1: Matches EXACT forward path for diagnostic validity."""
+        x = self.pool1(self.block1(x))
+        x = self.pool2(self.block2(x))
+        x = self.pool3(self.block3(x))
+        x = self.block4(x)
+        x = self.se(x)
+        avg = self.avg_pool(x).flatten(1)
+        mx  = self.max_pool(x).flatten(1)
+        feat = torch.cat([avg, mx], dim=1)
+        return self.norm(feat)  # LayerNorm must be included
+
+
+class DecisionHead(nn.Module):
+    def __init__(self, in_features=5):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, features):
+        return self.mlp(features)
 
 class NeuroXMultiDisease(nn.Module):
     """Multitask model with selective forward.
@@ -597,41 +900,74 @@ class NeuroXMultiDisease(nn.Module):
     Alzheimer uses a dedicated AlzheimerEncoder that receives raw MRI directly.
     SharedEncoder is used only for Tumor / Stroke.
     """
-    def __init__(self):
+    def __init__(self, in_channels=2): 
         super().__init__()
-        self.encoder = SharedEncoder(in_channels=1)
-        # Tumor & Stroke presence: transformer bottleneck -> PresenceHead
-        self.presence_heads = nn.ModuleDict({
-            "tumor":  PresenceHead(128),
-            "stroke": PresenceHead(128),
-            # "alzheimer" removed — uses dedicated AlzheimerEncoder
-        })
-        self.seg_decoders = nn.ModuleDict({
-            "tumor":  SegmentationDecoder(3, "tumor"),   # [ET, NCR, ED]
-            "stroke": SegmentationDecoder(1, "stroke")
-        })
+        self.encoder = SharedEncoder(in_channels=in_channels) # Fix 2: Pass in_channels to SharedEncoder
+        self.bottleneck = TransformerBottleneck3D(128, 4, 8, 256, 0.2) # Moved from SharedEncoder
+        
+        self.tumor_presence = PresenceHead(128)
+        self.stroke_presence = PresenceHead(128)
+        
+        self.tumor_decoder = SegmentationDecoder(3, "tumor")
+        self.stroke_decoder = SegmentationDecoder(1, "stroke")
+        
         # === Alzheimer Dedicated Encoder ===
         # Raw MRI -> independent 3D CNN -> dual pool -> MLP -> AD logit
         # No shared features with SharedEncoder.
         self.alz_encoder = AlzheimerEncoder()
+        
+        self.decision_head = DecisionHead()
+        self.temperature = nn.Parameter(torch.ones(1))
 
     def forward(self, x, active_presence=None, active_seg=None):
-        features = self.encoder(x)   # enc1, enc2, enc3, bottleneck
-        presence = {}
-        if active_presence:
-            for key in active_presence:
-                if key == "alzheimer":
-                    # AlzheimerEncoder receives raw MRI directly
-                    presence["alzheimer"] = self.alz_encoder(x)
-                elif key in self.presence_heads:
-                    # Tumor / Stroke: bottleneck -> PresenceHead (unchanged)
-                    presence[key] = self.presence_heads[key](features["bottleneck"])
-        segmentations = {}
-        if active_seg:
-            for key in active_seg:
-                if key in self.seg_decoders:
-                    segmentations[key] = self.seg_decoders[key](features)
-        return {"presence": presence, "segmentations": segmentations}
+        res = {"presence": {}, "segmentations": {}, "alzheimer_log_var": None}
+
+        # Optimization: Only run alz_encoder when presence["alzheimer"] is requested
+        if active_presence and "alzheimer" in active_presence:
+            alz_logits, alz_log_var = self.alz_encoder(x)
+            res["presence"]["alzheimer"] = alz_logits
+            res["alzheimer_log_var"] = alz_log_var
+            
+        # Shared Path (Seg + Presence) - Only run if Tumor/Stroke requested
+        if (active_presence and any(k in ["tumor", "stroke"] for k in active_presence)) or \
+           (active_seg and any(k in ["tumor", "stroke"] for k in active_seg)):
+            
+            feats = self.encoder(x)
+            # Fix #9: Smooth transformer alpha-blend (prevents hard-switch gradient shock)
+            # alpha linearly ramps 0→1 over epochs 1-6, then full transformer from epoch 7
+            _epoch = getattr(self, '_current_epoch', 99)
+            alpha = min(1.0, _epoch / 6.0)
+            if alpha < 1.0:
+                raw = feats["bottleneck_input"].detach()  # gradient-free bypass component
+                bottleneck_feats = alpha * self.bottleneck(feats["bottleneck_input"]) + (1.0 - alpha) * raw
+            else:
+                bottleneck_feats = self.bottleneck(feats["bottleneck_input"])
+            
+            # Presence Heads (Calibrated via global temperature)
+            temp = self.temperature.clamp(0.01, 10.0)
+            
+            if active_presence and "tumor" in active_presence:
+                 res["presence"]["tumor"] = self.tumor_presence(bottleneck_feats)
+            if active_presence and "stroke" in active_presence:
+                 res["presence"]["stroke"] = self.stroke_presence(bottleneck_feats)
+                 
+            # Segmentation Decoders
+            if active_seg and "tumor" in active_seg:
+                res["segmentations"]["tumor"] = self.tumor_decoder(feats, bottleneck_feats)
+            if active_seg and "stroke" in active_seg:
+                res["segmentations"]["stroke"] = self.stroke_decoder(feats, bottleneck_feats)
+
+        # Part D: Apply Temperature Scaling ONLY during eval (not training)
+        # During training, logit gradients should flow unscaled through the loss
+        if not self.training:
+            for k in res["presence"]:
+                if isinstance(res["presence"][k], tuple):
+                    logit, log_var = res["presence"][k]
+                    res["presence"][k] = (logit / self.temperature.clamp(0.01, 10.0), log_var)
+                else:
+                    res["presence"][k] = res["presence"][k] / self.temperature.clamp(0.01, 10.0)
+
+        return res
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  5. TRAINING UTILS (LOSS & METRICS)
@@ -651,181 +987,451 @@ def compute_dice_loss(logits, targets):
     dice = (2. * intersection + smooth) / (union + smooth)
     return 1.0 - dice.mean()
 
-def quick_dice(logits, targets):
-    """Dice Score (0-1) for logging. No gradients."""
-    probs = torch.sigmoid(logits)
-    preds = (probs > 0.5).float()
-    
-    inter = (preds * targets).sum(dim=(2, 3, 4))
-    union = preds.sum(dim=(2, 3, 4)) + targets.sum(dim=(2, 3, 4))
-    
+def quick_dice(probs, targets):
+    """Soft Dice Score (0-1) for logging. Expects sigmoid probabilities [0,1], NOT logits."""
+    # Do NOT apply sigmoid here — callers pass torch.sigmoid(output) directly.
+    inter = (probs * targets).sum(dim=(2, 3, 4))
+    union = probs.sum(dim=(2, 3, 4)) + targets.sum(dim=(2, 3, 4))
     dice = (2. * inter) / (union + 1e-6)
     return dice.mean().item()
 
-def focal_loss(logits, targets, gamma=2.0, alpha=0.25):
-    """Focal loss: focuses training on hard, misclassified voxels.
-    
-    Replaces BCE in segmentation. alpha balances foreground/background.
-    gamma=2.0 conservative start — increase later if needed.
-    """
-    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-    p_t = torch.exp(-bce)
-    focal = alpha * (1 - p_t) ** gamma * bce
-    return focal.mean()
 
-def train_step(model, batch, task, optimizer, scaler, epoch, skip_backward=False):
-    """
-    Standard training step for a single task.
-    If skip_backward=True, returns the total loss tensor without performing backward or step.
-    """
-    img = batch["image"].to(DEVICE)
-    tgt = batch["seg"].to(DEVICE) if task in ["tumor", "stroke"] else None
+def compute_ece(probs, labels, n_bins=10):
+    """Expected Calibration Error: Strictly bin-based reliability measure.
     
-    # ─── Forward ──────────────────────────────────────────────────────────
-    with torch.amp.autocast("cuda", enabled=USE_AMP):
-        if task == "alzheimer":
-            out = model(img, active_presence=["alzheimer"])["presence"]["alzheimer"]
-            if ALZ_POS_WEIGHT is not None:
-                loss = F.binary_cross_entropy_with_logits(out, batch["presence"]["alzheimer"].to(DEVICE), pos_weight=ALZ_POS_WEIGHT.to(DEVICE))
-            else:
-                loss = F.binary_cross_entropy_with_logits(out, batch["presence"]["alzheimer"].to(DEVICE))
-            total_loss = loss
+    🧩 Domain C: Scientific Alzheimer Metrics (ECE)
+    """
+    if not isinstance(probs, torch.Tensor):
+        probs = torch.from_numpy(probs)
+    if not isinstance(labels, torch.Tensor):
+        labels = torch.from_numpy(labels).float()
         
+    bins = torch.linspace(0, 1, n_bins + 1, device=probs.device)
+    ece = torch.zeros(1, device=probs.device)
+
+    for i in range(n_bins):
+        mask = (probs >= bins[i]) & (probs < bins[i+1])
+        if mask.sum() > 0:
+            acc = labels[mask].float().mean()
+            conf = probs[mask].mean()
+            # Weight the bin error by its frequency in the dataset
+            ece += (mask.float().mean()) * torch.abs(acc - conf)
+
+    return float(ece.item())
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  RESEARCH-GRADE SEGMENTATION METRICS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def dice_score(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-6) -> float:
+    """Dice Similarity Coefficient. Handles empty masks."""
+    pred_sum = pred.sum()
+    gt_sum   = gt.sum()
+    if pred_sum == 0 and gt_sum == 0:
+        return 1.0
+    if pred_sum == 0 or gt_sum == 0:
+        return 0.0
+    intersection = (pred * gt).sum()
+    return float((2.0 * intersection + eps) / (pred_sum + gt_sum + eps))
+
+def iou_score(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-6) -> float:
+    """Intersection over Union. Handles empty masks."""
+    pred_sum = pred.sum()
+    gt_sum   = gt.sum()
+    if pred_sum == 0 and gt_sum == 0:
+        return 1.0
+    if pred_sum == 0 or gt_sum == 0:
+        return 0.0
+    intersection = (pred * gt).sum()
+    union = pred_sum + gt_sum - intersection
+    return float((intersection + eps) / (union + eps))
+
+def hausdorff95(pred: np.ndarray, gt: np.ndarray,
+                spacing: tuple = (1.0, 1.0, 1.0),
+                fallback: float = 100.0) -> float:
+    """95th-percentile Hausdorff Distance in PHYSICAL SPACE (mm).
+    
+    spacing: voxel size in mm along each axis (D, H, W).
+    Without spacing the metric is in voxel units and becomes
+    dataset-dependent — scientifically invalid for reporting.
+    """
+    pred_pts = np.argwhere(pred > 0).astype(np.float64)
+    gt_pts   = np.argwhere(gt   > 0).astype(np.float64)
+    if len(pred_pts) == 0 and len(gt_pts) == 0:
+        return 0.0
+    if len(pred_pts) == 0 or len(gt_pts) == 0:
+        return fallback
+    # H1 FIX: Hard-stop if too many points for cdist (memory/time explosion)
+    if len(pred_pts) > 5000 or len(gt_pts) > 5000:
+        return fallback
+    # Convert voxel indices to mm coordinates
+    spacing_arr = np.array(spacing, dtype=np.float64)
+    pred_pts = pred_pts * spacing_arr
+    gt_pts   = gt_pts   * spacing_arr
+    distances = cdist(pred_pts, gt_pts, metric='euclidean')
+    hd95 = max(
+        np.percentile(np.min(distances, axis=1), 95),
+        np.percentile(np.min(distances, axis=0), 95)
+    )
+    return float(hd95)
+
+def average_surface_distance(pred: np.ndarray, gt: np.ndarray,
+                             spacing: tuple = (1.0, 1.0, 1.0),
+                             fallback: float = 100.0) -> float:
+    """Average Symmetric Surface Distance in PHYSICAL SPACE (mm)."""
+    pred_pts = np.argwhere(pred > 0).astype(np.float64)
+    gt_pts   = np.argwhere(gt   > 0).astype(np.float64)
+    if len(pred_pts) == 0 and len(gt_pts) == 0:
+        return 0.0
+    if len(pred_pts) == 0 or len(gt_pts) == 0:
+        return fallback
+    # Fix 6: Guard ASD against large lesioned GT masks (OOM safety)
+    if len(pred_pts) > 5000 or len(gt_pts) > 5000:
+        return fallback
+    spacing_arr = np.array(spacing, dtype=np.float64)
+    pred_pts = pred_pts * spacing_arr
+    gt_pts   = gt_pts   * spacing_arr
+    distances = cdist(pred_pts, gt_pts, metric='euclidean')
+    asd = (np.mean(np.min(distances, axis=1)) + np.mean(np.min(distances, axis=0))) / 2.0
+    return float(asd)
+
+def volume_error(pred: np.ndarray, gt: np.ndarray) -> float:
+    """Relative Volume Error |Vpred - Vgt| / Vgt. Returns nan if gt is empty."""
+    gt_vol = float(gt.sum())
+    if gt_vol == 0:
+        return float('nan')
+    return float(abs(float(pred.sum()) - gt_vol) / gt_vol)
+
+# How often to run the expensive HD95/ASD pass (in epochs)
+EVAL_HD_EVERY = 5
+
+def evaluate_segmentation_full(model, tumor_val_loader, stroke_val_loader, epoch: int) -> dict:
+    """Full segmentation validation: Dice, IoU, HD95 (mm), ASD (mm), VolumeError.
+    
+    🧩 Domain B: Research-Grade Metrics (TC, WT) and Temperature Calibration.
+    """
+    model.eval()
+    run_hd = (epoch % EVAL_HD_EVERY == 0)
+
+    # Accumulators
+    tumor_metrics  = {"et_dice": [], "tc_dice": [], "wt_dice": [],
+                      "tc_iou":  [], "wt_iou":  [], "tc_ve":   [], "wt_ve":   [],
+                      "et_hd95": [], "wt_hd95": [], "et_asd": [], "wt_asd": []}
+    stroke_metrics = {"dice": [], "iou": [], "ve": [], "hd95": [], "asd": []}
+
+    with torch.no_grad():
+        # ── Tumor VAL ──────────────────────────────────────────────────────────────
+        if tumor_val_loader:
+            for batch in tumor_val_loader:
+                img = batch["image"].to(DEVICE)
+                gt_all = batch["seg"].cpu().numpy()          # [B, 3, D, H, w]
+                
+                # Domain G: Dynamic Spacing
+                path = batch.get("path", [None])[0]
+                spacing = (1.0, 1.0, 1.0)
+                if path and Path(path).exists():
+                    try: spacing = nib.load(str(path)).header.get_zooms()[:3]
+                    except Exception: pass
+                
+                out = model(img, active_presence=["tumor"], active_seg=["tumor"])
+                # Fix 3: Standardize segmentation to threshold 0.5 on raw sigmoids (Maintain benchmark comparability)
+                probs = torch.sigmoid(out["segmentations"]["tumor"]).cpu().numpy()
+                
+                for b in range(img.shape[0]):
+                    gt_b   = (gt_all[b] > 0.5).astype(np.uint8)  # [3, D, H, W]
+
+                    # 🧩 Domain B: Tumor Core (TC) and Whole Tumor (WT)
+                    # ET: Enhancing Tumor (Ch 0)
+                    # TC: Tumor Core (NCR + ET) (Ch 1 + Ch 0)
+                    # WT: Whole Tumor (NCR + ET + ED) (Ch 1 + Ch 0 + Ch 2)
+                    p_et = (probs[b, 0] > 0.5).astype(np.uint8)
+                    p_tc = (np.any(probs[b, 0:2] > 0.5, axis=0)).astype(np.uint8)
+                    p_wt = (np.any(probs[b, 0:3] > 0.5, axis=0)).astype(np.uint8)
+                    
+                    gt_et = gt_b[0]
+                    gt_tc = (np.any(gt_b[0:2] > 0.5, axis=0)).astype(np.uint8)
+                    gt_wt = (np.any(gt_b[0:3] > 0.5, axis=0)).astype(np.uint8)
+                    
+                    tumor_metrics["et_dice"].append(dice_score(p_et, gt_et))
+                    tumor_metrics["tc_dice"].append(dice_score(p_tc, gt_tc))
+                    tumor_metrics["wt_dice"].append(dice_score(p_wt, gt_wt))
+                    
+                    tumor_metrics["tc_iou"].append(iou_score(p_tc, gt_tc))
+                    tumor_metrics["wt_iou"].append(iou_score(p_wt, gt_wt))
+                    tumor_metrics["tc_ve"].append(volume_error(p_tc, gt_tc))
+                    tumor_metrics["wt_ve"].append(volume_error(p_wt, gt_wt))
+                    
+                    if run_hd:
+                        tumor_metrics["et_hd95"].append(hausdorff95(p_et, gt_et, spacing=spacing))
+                        tumor_metrics["wt_hd95"].append(hausdorff95(p_wt, gt_wt, spacing=spacing))
+                        tumor_metrics["et_asd"].append(average_surface_distance(p_et, gt_et, spacing=spacing))
+                        tumor_metrics["wt_asd"].append(average_surface_distance(p_wt, gt_wt, spacing=spacing))
+
+        # ── Stroke VAL ──────────────────────────────────────────────────────────────
+        if stroke_val_loader:
+            for batch in stroke_val_loader:
+                img = batch["image"].to(DEVICE)
+                gt_np = batch["seg"].cpu().numpy()               # [B, 1, D, H, W]
+                
+                out = model(img, active_presence=["stroke"], active_seg=["stroke"])
+                # Fix 3: Standardize segmentation to threshold 0.5 on raw sigmoids
+                probs = torch.sigmoid(out["segmentations"]["stroke"]).cpu().numpy()
+
+                # Domain G: Dynamic Spacing
+                path = batch.get("path", [None])[0]
+                spacing = (1.0, 1.0, 1.0)
+                if path and Path(path).exists():
+                    try: spacing = nib.load(str(path)).header.get_zooms()[:3]
+                    except Exception: pass
+
+                for b in range(img.shape[0]):
+                    g = (gt_np[b, 0] > 0.5).astype(np.uint8)
+                    p_cal = (probs[b, 0] > 0.5).astype(np.uint8)
+                    
+                    stroke_metrics["dice"].append(dice_score(p_cal, g))
+                    stroke_metrics["iou"].append(iou_score(p_cal, g))
+                    stroke_metrics["ve"].append(volume_error(p_cal, g))
+                    
+                    if run_hd:
+                        stroke_metrics["hd95"].append(hausdorff95(p_cal, g, spacing=spacing))
+                        stroke_metrics["asd"].append(average_surface_distance(p_cal, g, spacing=spacing))
+
+    model.train()
+    
+    _agg = lambda x: np.nanmean(x) if len(x) > 0 else 0.0
+    t = tumor_metrics
+    s = stroke_metrics
+    agg = {
+        #Overlap (Scientific Research Set)
+        "tumor_et_dice":  _agg(t["et_dice"]),
+        "tumor_tc_dice":  _agg(t["tc_dice"]),
+        "tumor_wt_dice":  _agg(t["wt_dice"]),
+        "tumor_tc_iou":   _agg(t["tc_iou"]),
+        "tumor_wt_iou":   _agg(t["wt_iou"]),
+        "tumor_tc_ve":    _agg(t["tc_ve"]),
+        "tumor_wt_ve":    _agg(t["wt_ve"]),
+        
+        "stroke_dice":    _agg(s["dice"]),
+        "stroke_iou":     _agg(s["iou"]),
+        "stroke_ve":      _agg(s["ve"]),
+        
+        # Boundary (Physical mm)
+        "tumor_et_hd95":  _agg(t["et_hd95"]), "tumor_wt_hd95":  _agg(t["wt_hd95"]),
+        "stroke_hd95":    _agg(s["hd95"]),
+        "tumor_et_asd":   _agg(t["et_asd"]),  "tumor_wt_asd":   _agg(t["wt_asd"]),
+        "stroke_asd":     _agg(s["asd"]),
+    }
+
+    # Pretty print
+    print(f"\n  📐 SEG VALIDATION (Scientific Metric Set | Calibrated)")
+    print(f"  Tumor  | ET={agg['tumor_et_dice']:.4f} TC={agg['tumor_tc_dice']:.4f} WT={agg['tumor_wt_dice']:.4f}")
+    print(f"  Stroke | Dice={agg['stroke_dice']:.4f} IoU={agg['stroke_iou']:.4f}")
+    
+    # Hall of fame logic helper
+    agg["tumor_mean"] = (agg["tumor_et_dice"] + agg["tumor_tc_dice"] + agg["tumor_wt_dice"]) / 3
+    
+    return agg
+
+def evaluate_alzheimer_full(model, val_loader) -> dict:
+    """Full Alzheimer validation: AUROC, AUPRC, Brier Score, ECE.
+    
+    🧩 Domain C: Scientific Alzheimer Metrics (AUROC, AUPRC, Brier Score)
+    """
+    model.eval()
+    y_true, y_prob = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            img = batch["image"].to(DEVICE)
+            target = batch["presence"]["alzheimer"].to(DEVICE)
+            mask = batch["has_label"]["alzheimer"].to(DEVICE)
+            
+            # Fix 2: Alzheimer validation uses standard forward path for consistency
+            out = model(img, active_presence=["alzheimer"])
+            logit = out["presence"]["alzheimer"]
+            # Temperature scaling is applied inside forward() when not training
+            prob = torch.sigmoid(logit)
+            
+            y_true.append(target[mask.bool()].cpu().numpy())
+            y_prob.append(prob[mask.bool()].cpu().numpy())
+            
+    model.train()
+    
+    # Domain B: Scientific Alzheimer Metrics (AUROC, AUPRC, Brier Score)
+    # Binary metrics (F1, Accuracy, Precision, Recall) use 0.5 threshold
+    try:
+        y_true = np.concatenate(y_true)
+        y_prob = np.concatenate(y_prob)
+        y_pred = (y_prob > 0.5).astype(float)
+        
+        # 1. Probabilistic Benchmarks
+        auc_score = roc_auc_score(y_true, y_prob)
+        auprc     = average_precision_score(y_true, y_prob)
+        brier     = brier_score_loss(y_true, y_prob)
+        ece       = compute_ece(y_prob, y_true)
+        
+        # 2. Categorical Benchmarks (Threshold-based)
+        from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
+        f1       = f1_score(y_true, y_pred)
+        acc      = accuracy_score(y_true, y_pred)
+        prec     = precision_score(y_true, y_pred, zero_division=0)
+        rec      = recall_score(y_true, y_pred, zero_division=0)
+        
+        return {
+            "auc":       auc_score,
+            "auprc":     auprc,
+            "brier":     brier,
+            "ece":       ece,
+            "f1":        f1,
+            "accuracy":  acc,
+            "precision": prec,
+            "recall":    rec
+        }
+    except Exception as e:
+        print(f"⚠️ Validation error (pathology empty?): {e}")
+        return {
+            "auc": 0.5, "auprc": 0.5, "brier": 0.25, "ece": 0.0,
+            "f1": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0
+        }
+
+def train_step(model, batch, task, optimizer, scaler, epoch,
+               use_uncertainty=True, use_decision=True, ep_decision_weight=1.0):
+    img = batch["image"].to(DEVICE)
+    
+    # E3: AMP for seg tasks only (fp16 exp() overflows on ALZ)
+    amp_enabled = USE_AMP and (task in ["tumor", "stroke"])
+
+    # Fix #5: Gradient isolation — freeze shared encoder during ALZ backward
+    # Prevents ALZ classification gradients from corrupting seg encoder weights
+    if task == "alzheimer":
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+
+    with torch.amp.autocast("cuda", enabled=amp_enabled):
+        if task == "alzheimer":
+            out = model(img, active_presence=["alzheimer"])
+            calibrated_logit = out["presence"]["alzheimer"]
+            # Part 2: Logical shape enforcement — prevents silent broadcasting
+            calibrated_logit = torch.clamp(calibrated_logit.view(-1, 1), -5, 5)  # FIX 3: Tighter clamp
+            log_var = torch.clamp(out["alzheimer_log_var"], -0.5, 0.5)
+            
+            # Part 2: Logical shape enforcement — prevents silent broadcasting
+            target_pres = batch["presence"]["alzheimer"].to(DEVICE).float().view(-1, 1)
+            # FIX 2: Label smoothing (Diversity Hardening)
+            target_pres = target_pres * 0.9 + 0.05
+            
+            mask = batch["has_label"]["alzheimer"].to(DEVICE)
+            
+            # Part 1: No pos_weight — Sampler handles imbalance; loss stays neutral to avoid distortion
+            loss_pres = F.binary_cross_entropy_with_logits(
+                calibrated_logit, target_pres, reduction='none')
+            loss_pres = (loss_pres * mask).sum() / (mask.sum() + 1e-6)
+            # Fix #8: explicit L2 removed — AdamW weight_decay=1e-4 handles regularization
+            total_loss = LAMBDA_CLS * loss_pres
+            
         elif task in ["tumor", "stroke"]:
             res = model(img, active_presence=[task], active_seg=[task])
-            pres_logits = res["presence"][task]
-            seg_logits  = res["segmentations"][task]
+            logit, log_var = res["presence"][task]
+            log_var = torch.clamp(log_var, -0.5, 0.5)
+            seg_logits = res["segmentations"][task]
             
-            # Loss A: Presence (Controlled by global LAMBDA_CLS)
-            loss_pres = F.binary_cross_entropy_with_logits(pres_logits, batch["presence"][task].to(DEVICE))
+            target_pres = batch["presence"][task].to(DEVICE).float()
+            tgt = batch["seg"].to(DEVICE)
+            mask = batch["has_label"][task].to(DEVICE)
             
-            # Loss B: Segmentation (0.8 Dice + 0.2 BCE)
-            loss_dice = compute_dice_loss(seg_logits, tgt)
-            
-            if task == "stroke":
-                # Use dynamic STROKE_POS_WEIGHT (capped at 50)
-                loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt, pos_weight=STROKE_POS_WEIGHT.to(DEVICE))
+            bce = F.binary_cross_entropy_with_logits(logit, target_pres, reduction='none')
+            # D3: Staged uncertainty
+            if use_uncertainty:
+                loss_pres = bce * torch.exp(-log_var.detach()) + 0.05 * log_var
             else:
-                loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt)
-                
+                loss_pres = bce
+            loss_pres = (loss_pres * mask).sum() / (mask.sum() + 1e-6)
+            
+            loss_dice = compute_dice_loss(seg_logits, tgt).mean()
+            if task == "stroke":
+                loss_bce = F.binary_cross_entropy_with_logits(
+                    seg_logits, tgt, pos_weight=STROKE_POS_WEIGHT).mean()
+            else:
+                loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt).mean()
             loss_seg = 0.8 * loss_dice + 0.2 * loss_bce
             
             lam = LAMBDA_TUMOR if task == "tumor" else LAMBDA_STROKE
             total_loss = lam * loss_seg + LAMBDA_CLS * loss_pres
+            
+            # D3: Decision head — only active in joint phase
+            if use_decision:
+                with torch.no_grad():
+                    seg_p = torch.sigmoid(seg_logits / model.temperature.clamp(0.01, 10.0))
+                    feat_prob = torch.sigmoid(logit).view(-1, 1)
+                    feat_unc  = torch.exp(log_var).view(-1, 1)
+                    feat_vol  = seg_p.sum(dim=(1,2,3,4)).view(-1, 1) / (96**3)
+                    if seg_logits.shape[1] > 1:
+                        ps = torch.softmax(seg_logits.detach(), dim=1)
+                        ent_map = -(ps * torch.log(ps + 1e-8)).sum(dim=1, keepdim=True)
+                    else:
+                        ps = seg_p.detach().clamp(1e-8, 1 - 1e-8)
+                        ent_map = -(ps * torch.log(ps) + (1 - ps) * torch.log(1 - ps))
+                    feat_entropy = ent_map.mean(dim=(1,2,3,4), keepdim=False).view(-1, 1)
+                    feat_conf = seg_p.amax(dim=(2,3,4)).mean(dim=1, keepdim=True)
+                    inter = (seg_p * tgt).sum(dim=(1,2,3,4))
+                    union = seg_p.sum(dim=(1,2,3,4)) + tgt.sum(dim=(1,2,3,4))
+                    soft_dice = torch.where(union < 1e-5, torch.zeros_like(inter), (2.*inter)/(union+1e-6))
+                    correct_target = soft_dice.unsqueeze(1)
+                
+                features = torch.cat([feat_prob.detach(), feat_unc.detach(),
+                                      feat_vol, feat_entropy, feat_conf], dim=1)
+                dec_pred = model.decision_head(features)
+                loss_dec = F.binary_cross_entropy_with_logits(dec_pred, correct_target)
+                # Fix #10: decision_weight applied into total_loss
+                total_loss = total_loss + ep_decision_weight * loss_dec
 
-    # ─── Stability Check ──────────────────────────────────────────────────
-    if not torch.isfinite(total_loss):
-        print(f"⚠️ Non-finite loss detected in {task} at Epoch {epoch}. Skipping.")
+    # Fix #5: Restore shared encoder gradients after ALZ forward
+    if task == "alzheimer":
+        for p in model.encoder.parameters():
+            p.requires_grad = True
+
+    # Part B: Fix Loss Gate (Task-specific thresholds)
+    if task == "alzheimer":
+        threshold = 4.0
+    elif task == "stroke":
+        threshold = 12.0
+    elif task == "tumor":
+        threshold = 8.0
+    else:
+        threshold = 8.0
+
+    if not torch.isfinite(total_loss) or total_loss.item() > threshold:
+        optimizer.zero_grad(set_to_none=True)
         return None
-
-    # Logit Quality Audit (Early Warning)
-    with torch.no_grad():
-        if task in ["tumor", "stroke"]:
-            std = seg_logits.std().item()
-            if std > 10.0:
-                print(f"⚠️ High Logit STD ({std:.2f}) in {task} at Epoch {epoch}")
-
-    # ─── Backward & Step ──────────────────────────────────────────────────
-    if skip_backward:
-        return total_loss
-
-    # Redundant zero_grad removed - handled in main loop
-    scaler.scale(total_loss).backward()
     
-    # Gradient Clipping (1.0)
-    scaler.unscale_(optimizer)
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    
-    scaler.step(optimizer)
-    scaler.update()
-    
-    return total_loss.item()
+    return total_loss
 
-def evaluate_alzheimer_full(model, loader):
-    """Full Alzheimer classification metrics: AUC, Accuracy, Precision, Recall, F1.
-
-    Uses dedicated AlzheimerEncoder — self-contained forward pass on raw MRI.
-    Correctly accesses batch["presence"]["alzheimer"] per AlzheimerDataset format.
-    """
-    model.eval()
-    all_logits, all_labels = [], []
-    with torch.no_grad():
-        for batch in loader:
-            img = batch["image"].to(DEVICE)
-            lbl = batch["presence"]["alzheimer"].float()  # shape [B, 1]
-            # AlzheimerEncoder is self-contained: raw MRI -> logit
-            logit = model.alz_encoder(img)                # [B, 1]
-            all_logits.append(logit.cpu())
-            all_labels.append(lbl)
-    model.train()
-
-    logits  = torch.cat(all_logits).view(-1).numpy()
-    labels  = torch.cat(all_labels).view(-1).numpy()
-    probs   = 1.0 / (1.0 + np.exp(-logits))
-
-    logit_mean = float(logits.mean())
-    logit_std  = float(logits.std())
-    tqdm.write(
-        f"   📊 Logit Diagnostics | mean={logit_mean:.4f}  std={logit_std:.4f}"
-        f"  {'✅ OK' if logit_std > 0.3 else '⚠️ LOW STD — encoder may be dormant'}"
-    )
-
-    try:
-        auc = roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else 0.5
-    except Exception:
-        auc = 0.5
-
-    # Fixed-threshold metrics (threshold=0.5)
-    preds_fixed = (probs >= 0.5).astype(int)
-    acc_fixed   = accuracy_score(labels, preds_fixed)
-    prec_fixed  = precision_score(labels, preds_fixed, zero_division=0)
-    rec_fixed   = recall_score(labels, preds_fixed, zero_division=0)
-    f1_fixed    = f1_score(labels, preds_fixed, zero_division=0)
-
-    # Optimal-threshold metrics calculation
-    opt_thresh = 0.5
-    if len(np.unique(labels)) > 1:
-        try:
-            fpr, tpr, thresholds = roc_curve(labels, probs)
-            optimal_idx = (tpr - fpr).argmax()
-            opt_thresh  = float(thresholds[optimal_idx])
-        except Exception:
-            pass
-    preds_opt = (probs >= opt_thresh).astype(int)
-    acc_opt   = accuracy_score(labels, preds_opt)
-    prec_opt  = precision_score(labels, preds_opt, zero_division=0)
-    rec_opt   = recall_score(labels, preds_opt, zero_division=0)
-    f1_opt    = f1_score(labels, preds_opt, zero_division=0)
-
-    tqdm.write(
-        f"   🛡️  Alzheimer Val  | AUC={auc:.4f}\n"
-        f"   📌 Fixed  thr=0.50 | Acc={acc_fixed:.3f}  Prec={prec_fixed:.3f}  "
-        f"Rec={rec_fixed:.3f}  F1={f1_fixed:.3f}\n"
-        f"   🎯 Optimal thr={opt_thresh:.2f} | Acc={acc_opt:.3f}  Prec={prec_opt:.3f}  "
-        f"Rec={rec_opt:.3f}  F1={f1_opt:.3f}"
-    )
-
-    # Return fixed-threshold metrics for history (consistent across epochs)
-    acc, prec, rec, f1 = acc_fixed, prec_fixed, rec_fixed, f1_fixed
-    return {"auc": auc, "accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
 
 def check_batches(tumor_loader, stroke_loader):
-    """Pre-training batch sanity check."""
+    """Pre-training batch sanity check. Skips gracefully on empty loaders."""
     print("\n🔍 PRE-TRAINING BATCH CHECK 🔍")
-    try:
-        batch = next(iter(tumor_loader))
-        img, seg = batch["image"], batch["seg"]
-        print(f"✅ Tumor Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
-        if seg.sum() < 1:
-            print("⚠️ WARNING: Tumor mask sum is 0!")
+    if tumor_loader is None or len(tumor_loader) == 0:
+        print("⚠️ Tumor loader is empty — skipping batch check.")
+    else:
+        try:
+            batch = next(iter(tumor_loader))
+            img, seg = batch["image"], batch["seg"]
+            print(f"✅ Tumor Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
+            if seg.sum() < 1:
+                print("⚠️ WARNING: Tumor mask sum is 0!")
+        except Exception as e:
+            print(f"❌ Tumor Batch Check Failed: {e}")
 
-        batch = next(iter(stroke_loader))
-        img, seg = batch["image"], batch["seg"]
-        print(f"✅ Stroke Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
-        if seg.sum() < 1:
-            print("⚠️ WARNING: Stroke mask sum is 0 (Small lesion lost in resize?)")
-    except Exception as e:
-        print(f"❌ Batch Check Failed: {e}")
+    if stroke_loader is None or len(stroke_loader) == 0:
+        print("⚠️ Stroke loader is empty — skipping batch check.")
+    else:
+        try:
+            batch = next(iter(stroke_loader))
+            img, seg = batch["image"], batch["seg"]
+            print(f"✅ Stroke Batch: Img {img.shape} Range [{img.min():.2f}, {img.max():.2f}] | Seg {seg.shape} Sum {seg.sum().item():.0f}")
+            if seg.sum() < 1:
+                print("⚠️ WARNING: Stroke mask sum is 0 (Small lesion lost in resize?)")
+        except Exception as e:
+            print(f"❌ Stroke Batch Check Failed: {e}")
     print("="*40 + "\n")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -833,67 +1439,175 @@ def check_batches(tumor_loader, stroke_loader):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
-    global USE_AMP
-    # 1. Prepare Datasets
-    tumor_ds = TumorDataset("/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation/", debug=DEBUG)
-    stroke_ds = StrokeDataset("/kaggle/input/datasets/orvile/isles-2022-brain-stoke-dataset/", debug=DEBUG)
-    
-    alz_train_data, alz_val_data = build_alzheimer_subject_split(
-        "/kaggle/input/datasets/muhammadzahraan/3d-mri-scans-for-alzheimer-disease",
-        seed=SEED,
-        debug=DEBUG
-    )
-    # New AlzheimerDataset supports record-based initialization
-    alz_train_ds = AlzheimerDataset(alz_train_data, augment=True)
-    alz_val_ds = AlzheimerDataset(alz_val_data, augment=False)
+    global USE_AMP, STROKE_POS_WEIGHT
 
-    # Compute Alzheimer class weight from training labels
-    global ALZ_POS_WEIGHT
-    if alz_train_data:
-        alz_labels = [record["label"] for record in alz_train_data]
-        counts = Counter(alz_labels)
-        pos_w = counts.get(0, 1) / max(counts.get(1, 1), 1)  # N_neg / N_pos
-        ALZ_POS_WEIGHT = torch.tensor([pos_w], device=DEVICE)
-        print(f"✅ ALZ_POS_WEIGHT = {pos_w:.2f} (neg={counts.get(0,0)}, pos={counts.get(1,0)})")
+    # R3 FIX: Persistence over destruction (Fix 1)
+    print("📦 Using persistent cache for rapid session resume...")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # STEP 6: DATA DISCOVERY (Section 1)
+    # Pre-initialize loaders to None (Domain A: Runtime Fix)
+    tumor_loader, stroke_loader, alz_loader = None, None, None
+    tumor_val_loader, stroke_val_loader, alz_val_loader = None, None, None
+    tumor_train_ds, stroke_train_ds, alz_train_ds = None, None, None
+    tumor_val_ds, stroke_val_ds, alz_val_ds = None, None, None
+    
+    # Audit Fix 1: Initialize scheduler to None to prevent potential NameError
+    scheduler_alz = None
+    
+    print(f"\n🔍 1. Discovery: Paths are task-isolated ...")
+    
+    # Tumor (Dual Root: 2020 + 2021 Optimization)
+    try:
+        tumor_datasets = []
+        for troot in [TUMOR_ROOT, TUMOR_ROOT_2021]:
+            if troot.exists():
+                try:
+                    ds = TumorDataset(troot, debug=DEBUG)
+                    if len(ds) > 0:
+                        tumor_datasets.append(ds)
+                        print(f"   ✅ Loaded tumor from {troot.name}: {len(ds)} cases")
+                except Exception as e:
+                    print(f"   ⚠️ Tumor root skipped: {troot.name} | {e}")
+        
+        if tumor_datasets:
+            from torch.utils.data import ConcatDataset
+            tumor_ds_full = ConcatDataset(tumor_datasets) if len(tumor_datasets) > 1 else tumor_datasets[0]
+            print(f"✅ Combined Tumor Dataset: {len(tumor_ds_full)} total cases")
+            idx_t = range(len(tumor_ds_full))
+            train_idx, val_idx = train_test_split(list(idx_t), test_size=0.2, random_state=SEED)
+            tumor_train_ds = torch.utils.data.Subset(tumor_ds_full, train_idx)
+            tumor_val_ds   = torch.utils.data.Subset(tumor_ds_full, val_idx)
+        else:
+            tumor_train_ds, tumor_val_ds = None, None
+            print("⚠️ No tumor data found.")
+    except Exception as e: print(f"⚠️ Serious Tumor Load Error: {e}")
+
+    # Stroke
+    try:
+        stroke_ds_full = StrokeDataset(STROKE_ROOT, debug=DEBUG)
+        if len(stroke_ds_full) > 0:
+            idx_s = range(len(stroke_ds_full))
+            train_idx, val_idx = train_test_split(idx_s, test_size=0.2, random_state=SEED)
+            stroke_train_ds = torch.utils.data.Subset(stroke_ds_full, train_idx)
+            stroke_val_ds   = torch.utils.data.Subset(stroke_ds_full, val_idx)
+    except Exception as e: print(f"⚠️ Stroke Load Error: {e}")
+
+    # Alzheimer (Hybrid Load: Alz A + Alz B)
+    try:
+        # Load both preprocessed (A) and raw/sorted (B) cohorts
+        alz_configs = [(ALZ_A_ROOT, "preprocessed"), (ALZ_B_ROOT, "raw")]
+        alz_train_rec, alz_val_rec = build_alzheimer_subject_split(alz_configs, seed=SEED, debug=DEBUG)
+        
+        if alz_train_rec:
+            # AlzheimerDataset now uses the 'type' field from each record for per-sample normalization
+            alz_train_ds = AlzheimerDataset(alz_train_rec, augment=True)
+            alz_val_ds   = AlzheimerDataset(alz_val_rec,   augment=False)
+            print(f"   🧬 Alzheimer hybrid cohort built with {len(alz_train_ds)} train samples.")
+    except Exception as e:
+        print(f"⚠️ Alzheimer Load Error: {e}")
+
+    # Domain H: Hard stop if NO datasets loaded
+    if not any([tumor_train_ds, stroke_train_ds, alz_train_ds]):
+        raise RuntimeError("❌ HARD STOP: No valid datasets found across any task.")
+
+    # STEP 8: CREATE DATALOADERS
+    loader_kwargs = dict(batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=False)
+    val_kwargs    = dict(batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=False)
+
+    tumor_loader  = DataLoader(tumor_train_ds, **loader_kwargs) if tumor_train_ds else None
+    stroke_loader = DataLoader(stroke_train_ds, **loader_kwargs) if stroke_train_ds else None
+    
+    # Part 3: WeightedRandomSampler — ensures balanced AD/CN across all batches
+    if alz_train_ds:
+        from torch.utils.data import WeightedRandomSampler
+        alz_labels       = [r["label"] for r in alz_train_ds.records]
+        class_counts     = np.bincount(alz_labels)
+        class_weights    = 1.0 / (class_counts + 1e-6)
+        sample_weights   = [class_weights[l] for l in alz_labels]
+        alz_sampler      = WeightedRandomSampler(
+            sample_weights,
+            num_samples=len(sample_weights) * 2, # Part 4: 2x oversampling to increase signal
+            replacement=True
+        )
+        alz_loader = DataLoader(
+            alz_train_ds, batch_size=BATCH_SIZE,
+            sampler=alz_sampler,
+            num_workers=NUM_WORKERS, pin_memory=True
+        )
     else:
-        ALZ_POS_WEIGHT = None
+        alz_loader = None
     
-    # 2. DataLoaders
-    loader_kwargs = dict(
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        persistent_workers=(NUM_WORKERS > 0)
-    )
-    tumor_loader  = DataLoader(tumor_ds, **loader_kwargs)
-    stroke_loader = DataLoader(stroke_ds, **loader_kwargs)
-    alz_train_loader = DataLoader(alz_train_ds, **loader_kwargs)
-    alz_val_loader   = DataLoader(alz_val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                                  num_workers=NUM_WORKERS, pin_memory=True,
-                                  persistent_workers=(NUM_WORKERS > 0))
-    # Calculate Stroke Class Imbalance (Dynamic Once)
-    print("\n⚖️  Calculating Stroke Class Imbalance...")
-    total_pos = 0
-    total_voxels = 0
-    for i in range(len(stroke_ds)):
-        sample = stroke_ds[i]
-        mask = sample["seg"]
-        total_pos += mask.sum().item()
-        total_voxels += mask.numel()
+    tumor_val_loader  = DataLoader(tumor_val_ds, **val_kwargs) if tumor_val_ds else None
+    stroke_val_loader = DataLoader(stroke_val_ds, **val_kwargs) if stroke_val_ds else None
+    alz_val_loader     = DataLoader(alz_val_ds,   **val_kwargs) if alz_val_ds else None
+
+    # hard validation and sanity logs (Fix 4 / 6)
+    print("\n📊 2. Hard Data Validation Gate")
     
-    total_neg = total_voxels - total_pos
-    s_weight = min(total_neg / (total_pos + 1e-6), 50.0)
-    global STROKE_POS_WEIGHT
-    STROKE_POS_WEIGHT = torch.tensor([s_weight], device=DEVICE)
-    print(f"   Stroke pos_weight: {s_weight:.2f} (Capped at 50)")
+    def validate_dataset_stats(ds, name, is_seg=True):
+        if not ds: return False
+        print(f"   🔍 Analyzing {name} ...")
+        n_check = min(10, len(ds))
+        indices = random.sample(range(len(ds)), n_check)
+        
+        all_means, all_stds = [], []
+        mask_nonzero_counts = 0
+        
+        for i in indices:
+            batch = ds[i]
+            img = batch["image"]
+            all_means.append(img.mean().item())
+            all_stds.append(img.std().item())
+            if is_seg:
+                if batch["seg"].sum() > 0:
+                    mask_nonzero_counts += 1
+        
+        avg_mean = np.mean(all_means)
+        avg_std  = np.mean(all_stds)
+        print(f"      Stats: mean={avg_mean:.3f}, std={avg_std:.3f}")
+        
+        # Hard Stop: Intensity Collapse
+        if abs(avg_mean) > 5.0 or avg_std < 0.1:
+            raise RuntimeError(f"❌ HARD STOP: {name} intensity stats pathological (Collapse/Shift detected)")
+        
+        # Hard Stop: Mask Missing (if seg dataset)
+        if is_seg:
+            coverage = mask_nonzero_counts / n_check
+            print(f"      Mask Coverage: {coverage:.1%} in checked sample")
+            if coverage == 0.0 and len(ds) > 10:
+                raise RuntimeError(f"❌ HARD STOP: {name} masks are ALL empty in preview. Check discovery/preprocessing.")
+        return True
+
+    validate_dataset_stats(tumor_train_ds, "Tumor", is_seg=True)
+    validate_dataset_stats(stroke_train_ds, "Stroke", is_seg=True)
+    validate_dataset_stats(alz_train_ds, "Alzheimer", is_seg=False)
+
+    # Alzheimer Balance check
+    if alz_train_ds:
+        all_alz_labels = [r["label"] for r in alz_train_ds.records]
+        alz_pos = int(sum(all_alz_labels))
+        alz_neg = len(all_alz_labels) - alz_pos
+        pos, neg = alz_pos, alz_neg
+        print(f"   ⚖️ ALZ Balance: AD={alz_pos}, CN={alz_neg}")
+    else:
+        alz_pos, alz_neg = 236, 972  # fallback constants
+        pos, neg = alz_pos, alz_neg
+
+    if stroke_train_ds:
+        STROKE_POS_WEIGHT = torch.tensor([20.0], device=DEVICE)
+    else:
+        STROKE_POS_WEIGHT = torch.tensor([1.0], device=DEVICE)
+
+    TUMOR_SPACING  = (1.0, 1.0, 1.0)   
+    STROKE_SPACING = (1.0, 1.0, 1.0)
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  7. OPTIMIZER & SCALER (PHASE-AWARE GROUPS)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    # 3. Setup Model & Optimizers
-    model = NeuroXMultiDisease().to(DEVICE)
+    # 3. Setup Model & Optimizers (Enforced 2-Channel for FLAIR+T1ce)
+    model = NeuroXMultiDisease(in_channels=2).to(DEVICE)
 
     # Separate Conv vs Transformer parameters for shared encoder components
     conv_params = []
@@ -913,91 +1627,175 @@ def main():
         {"params": transformer_params, "lr": 5e-5}
     ], weight_decay=WEIGHT_DECAY)
 
-    optimizer_alz = torch.optim.AdamW(model.alz_encoder.parameters(), lr=1e-4, weight_decay=WEIGHT_DECAY)
+    # Fix 1: Phase-aware LR — epoch 1 is always Phase 1, so set baseline lr
+    # lr_alz will be recomputed each epoch at the top of the epoch loop
+    optimizer_alz = torch.optim.AdamW(model.alz_encoder.parameters(), lr=3e-5, weight_decay=1e-4)
+    # scheduler_alz removed — conflicts with explicit phase-aware LR control
+    scheduler_shared = None
 
     # Initial scalers
+    # NOTE: scaler_alz is disabled — Alzheimer train_step runs in fp32 (no autocast).
+    # Tumor/stroke use AMP for memory efficiency on T4.
     scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
-    scaler_alz    = torch.amp.GradScaler(enabled=USE_AMP)
+    scaler_alz    = torch.amp.GradScaler(enabled=False)  # Alzheimer always fp32
 
-    # Dual Schedulers (Removed for stability - using constant LRs)
     scheduler_shared = None
-    scheduler_alz    = None
-    
-    # Pre-Training Check
-    check_batches(tumor_loader, stroke_loader)
-    
+
     print(f"🚀 Starting Training (DEBUG={DEBUG}, EPOCHS={EPOCHS})...")
+
+    # ─── DATASET SANITY CHECKS (Section 9) ──────────────────────────────────
+    def dataset_sanity_check(ds, name):
+        if not ds or len(ds) == 0: return
+        sample = ds[0]
+        img = sample["image"]
+        if torch.isnan(img).any():
+            print(f"📊 {name} Sanity Check: ❌ CRITICAL: NaN detected in first sample")
+        else:
+            print(f"📊 {name} Sanity: shape={img.shape}, range=[{img.min():.2f}, {img.max():.2f}]")
+
+    dataset_sanity_check(tumor_train_ds, "Tumor")
+    dataset_sanity_check(stroke_train_ds, "Stroke")
+    dataset_sanity_check(alz_train_ds, "Alzheimer")
     
-    # Metrics history — defined BEFORE loop so each epoch appends cumulatively
+    # ─────────────────────────────────────────────────────────────────────────
+    # Metrics History
+    # ─────────────────────────────────────────────────────────────────────────
     metrics_history = {
-        "epoch":         [],
-        "tumor_et":      [],
-        "tumor_ncr":     [],
-        "tumor_ed":      [],
-        "tumor_mean":    [],
-        "stroke_dice":   [],
-        "alz_auc":       [],
-        "alz_accuracy":  [],
-        "alz_precision": [],
-        "alz_recall":    [],
-        "alz_f1":        [],
+        "epoch": [],
+        "train": {
+            "tumor": {"loss": [], "et_dice": [], "mean_dice": []},
+            "stroke": {"loss": [], "dice": []},
+            "alz":   {"loss": []},
+        },
+        "val": {
+            "tumor": {
+                "et_dice":  [], "tc_dice":  [], "wt_dice":  [],
+                "tc_iou":   [], "wt_iou":   [],
+                "et_hd95":  [], "wt_hd95":  [],
+                "et_asd":   [], "wt_asd":   [],
+                "tc_ve":    [], "wt_ve":    [],
+            },
+            "stroke": {
+                "dice":  [], "iou":  [],
+                "hd95":  [], "asd":  [],
+                "ve":    [],
+            },
+            "alz": {
+                "auc":       [], "auprc":     [], "brier":     [], "ece":      [],
+                "f1":        [], "accuracy":  [], "precision": [], "recall":   [],
+            },
+        },
+        "meta": {
+            "score":      [],
+            "best_epoch": None,
+            "best_score": None,
+        },
     }
     
-    for epoch in range(1, EPOCHS + 1):
+    # Change 20: Robust Checkpoint Resume System
+    # Priority: 1. Manual RESUME_PATH -> 2. Persistent 'neurox_last.pth' -> 3. Fallback 'neurox_model.pth'
+    start_epoch = 1
+    checkpoint_to_load = None
+    if RESUME_PATH and Path(RESUME_PATH).exists():
+        print(f"🔄 Resuming from {RESUME_PATH}...")
+        # Fix 5: Ensure checkpoint_to_load is set for RESUME_PATH branch
+        checkpoint_to_load = Path(RESUME_PATH)
+    elif (CHECKPOINT_DIR / "neurox_last.pth").exists():
+        checkpoint_to_load = CHECKPOINT_DIR / "neurox_last.pth"
+    elif (CHECKPOINT_DIR / "neurox_model.pth").exists():
+        checkpoint_to_load = CHECKPOINT_DIR / "neurox_model.pth"
+        
+    if checkpoint_to_load:
+        print(f"\n🔁 Found existing checkpoint: {checkpoint_to_load}")
+        try:
+            ckpt = torch.load(checkpoint_to_load, map_location=DEVICE, weights_only=False)
+            model.load_state_dict(ckpt["model"])
+            optimizer_shared.load_state_dict(ckpt["optimizer_shared"])
+            optimizer_alz.load_state_dict(ckpt["optimizer_alz"])
+            if "scaler_shared" in ckpt: scaler_shared.load_state_dict(ckpt["scaler_shared"])
+            if "scaler_alz" in ckpt: scaler_alz.load_state_dict(ckpt["scaler_alz"])
+            
+            # Robust metrics resume: merge loaded metrics with current structure to avoid KeyErrors
+            loaded_metrics = ckpt.get("metrics", {})
+            for top_k in ["train", "val"]:
+                if top_k in loaded_metrics:
+                    for task_k in loaded_metrics[top_k]:
+                        if task_k in metrics_history[top_k]:
+                            for metric_k in loaded_metrics[top_k][task_k]:
+                                if metric_k in metrics_history[top_k][task_k]:
+                                    metrics_history[top_k][task_k][metric_k] = loaded_metrics[top_k][task_k][metric_k]
+            
+            start_epoch = ckpt["epoch"] + 1
+            print(f"✅ Successfully resumed from epoch {ckpt['epoch']}. Next: {start_epoch}")
+        except Exception as e:
+            print(f"⚠️ Failed to load checkpoint: {e}. Starting fresh.")
+
+    recovery_triggered = False  # Fix 4: guard against repeated adaptive boosts
+    for epoch in range(start_epoch, EPOCHS + 1):
         global LAMBDA_CLS
-        # ─── 80-EPOCH CURRICULUM ──────────────────────────────────
-        if epoch <= 20:
-            phase_name = " PHASE 1: ALZHEIMER PRETRAINING"
-            TRAIN_ALZ, TRAIN_SEG = True, False
+        USE_AMP = True
+
+        # Fix 1: Phase-aware LR for ALZ optimizer (set before any reset)
+        if epoch <= 10:
+            lr_alz = 3e-5
+        elif epoch <= 26:
+            lr_alz = 1.5e-5
         else:
-            phase_name = " PHASE 2: SEGMENTATION (STABILIZED)"
-            TRAIN_ALZ, TRAIN_SEG = False, True
-
-        # ─── PHASE TRANSITIONS (CURRICULUM LOGIC) ──────────────────────────
+            lr_alz = 1e-5
+        # Update existing optimizer LR each epoch
+        for pg in optimizer_alz.param_groups:
+            pg["lr"] = lr_alz
+            
+        # Section F: PHASE-AWARE CURRICULUM (Sourced from top-level PHASE_CONFIG)
+        active_phase = None
+        for cutoff in sorted(PHASE_CONFIG.keys()):
+            if epoch <= cutoff:
+                active_phase = PHASE_CONFIG[cutoff]
+                break
         
-        if epoch == 1:
-            print(f"\n❄️  PHASE 1: ALZHEIMER PRE-TRAIN")
-            for name, p in model.named_parameters():
-                if "alz_encoder" in name: p.requires_grad = True
-                else: p.requires_grad = False
-            USE_AMP = True
-            TRAIN_ALZ, TRAIN_SEG = True, False
-            LAMBDA_CLS = 2.0
-
-        if epoch == 21:
-            print(f"\n🔥 PHASE 2A: SEGMENTATION WARMUP (AMP OFF, TRANS FROZEN)")
-            for name, p in model.named_parameters():
-                if "alz_encoder" in name: p.requires_grad = False
-                elif "bottleneck" in name: p.requires_grad = False
-                else: p.requires_grad = True
+        if active_phase is None: 
+            active_phase = (True, True) # Fallback to co-training
             
-            USE_AMP = False
-            LAMBDA_CLS = 0.0 # Pure segmentation phase
-            scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
+        TRAIN_ALZ, TRAIN_SEG = active_phase
             
-            # Dampening LR for Phase Transition (Epoch 21-22)
-            optimizer_shared.param_groups[0]['lr'] = 5e-5 # convs
-            TRAIN_ALZ, TRAIN_SEG = False, True
-
-        if epoch == 23:
-            print(f"\n📈 Phase 2A': Standardizing Seg LR")
-            optimizer_shared.param_groups[0]['lr'] = 1e-4
-
-        if epoch == 26:
-            print(f"\n🚀 PHASE 2B: FULL SEGMENTATION (AMP ON, TRANS UNFROZEN)")
-            for name, p in model.named_parameters():
-                if "bottleneck" in name: p.requires_grad = True
+        # Hard isolation via grad-freezing
+        for p in model.encoder.parameters():
+            p.requires_grad = TRAIN_SEG
+        for p in model.tumor_decoder.parameters(): # Specific to tumor_decoder
+            p.requires_grad = TRAIN_SEG
+        for p in model.stroke_decoder.parameters(): # Specific to stroke_decoder
+            p.requires_grad = TRAIN_SEG
+        for p in model.tumor_presence.parameters(): # Specific to tumor_presence
+            p.requires_grad = TRAIN_SEG
+        for p in model.stroke_presence.parameters(): # Specific to stroke_presence
+            p.requires_grad = TRAIN_SEG
+        for p in model.bottleneck.parameters(): # Specific to bottleneck
+            p.requires_grad = TRAIN_SEG
+        for p in model.decision_head.parameters(): # Specific to decision_head
+            p.requires_grad = TRAIN_SEG
+        for p in model.alz_encoder.parameters():
+            p.requires_grad = TRAIN_ALZ
             
-            USE_AMP = True
-            scaler_shared = torch.amp.GradScaler(enabled=USE_AMP)
-            optimizer_shared.param_groups[1]['lr'] = 5e-5 # transformer
+        LAMBDA_CLS = 1.0  # Alzheimer task scaling (Part C)
 
-        # ─── Loop Setup ─────────────────────────────────────────────────────
+        # Fix 6/7: Temperature freeze aligned to Phase 3 start (epoch 27)
+        model.temperature.requires_grad = (epoch >= 27)
+
+        # Fix 6: Uncertainty / decision head staged to Phase 3 (epoch 27+)
+        use_uncertainty = (epoch >= 27)
+        use_decision    = (epoch >= 27)
+        if 27 <= epoch <= 31:
+            ep_decision_weight = 0.3   # warm-in decision head gently
+        else:
+            ep_decision_weight = 1.0
+
+        # Loop Setup
         model.train()
+
         
-        tumor_iter  = iter(tumor_loader)  if TRAIN_SEG else None
-        stroke_iter = iter(stroke_loader) if TRAIN_SEG else None
-        alz_iter    = iter(alz_train_loader) if TRAIN_ALZ else None
+        tumor_iter  = iter(tumor_loader)  if (TRAIN_SEG and tumor_loader) else None
+        stroke_iter = iter(stroke_loader) if (TRAIN_SEG and stroke_loader) else None
+        alz_iter    = iter(alz_loader)    if (TRAIN_ALZ and alz_loader) else None
         
         t_losses, s_losses, a_losses = [], [], []
         t_et_dices, t_ncr_dices, t_ed_dices = [], [], []
@@ -1005,164 +1803,398 @@ def main():
         
         avg_et, avg_ncr, avg_ed, avg_tumor_mean, avg_stroke, avg_alz_loss = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-        if TRAIN_ALZ:
-            max_steps = len(alz_train_loader)
-        elif TRAIN_SEG:
-            max_steps = min(len(tumor_loader), len(stroke_loader))
+        # Fix #9: Set current epoch on model for smooth transformer blend
+        model._current_epoch = epoch
+        if epoch == 7:
+            print("  ⚡ Transformer bottleneck at full alpha (epoch 7)")
+
+        # E1: Step cap for SEG-only phase (Kaggle time budget)
+        if TRAIN_SEG:
+            seg_lens = [len(l) for l in [tumor_loader, stroke_loader] if l is not None]
+            steps_seg = max(seg_lens) if seg_lens else 0
+            if TRAIN_SEG and not TRAIN_ALZ:
+                steps_seg = min(steps_seg, 1000)
         else:
-            max_steps = 0
+            steps_seg = 0
+        steps_alz = len(alz_loader) if (TRAIN_ALZ and alz_loader) else 0
+        max_steps = max(steps_alz, steps_seg)
 
         print(f"\n{'='*75}")
         print(f"  EPOCH {epoch}/{EPOCHS} | TRAIN_ALZ={TRAIN_ALZ} TRAIN_SEG={TRAIN_SEG} AMP={USE_AMP}")
         print(f"{'='*75}")
         
-        for step in range(max_steps):
-            if TRAIN_SEG: optimizer_shared.zero_grad()
-            if TRAIN_ALZ: optimizer_alz.zero_grad()
-            
-            # --- Alzheimer Update (Phase 1) ---
-            if TRAIN_ALZ:
-                try:
-                    batch = next(alz_iter)
-                    loss = train_step(model, batch, "alzheimer", optimizer_alz, scaler_alz, epoch)
-                    if loss is not None: a_losses.append(loss)
-                except (StopIteration, TypeError):
-                    pass
-            
-            # --- Unified Segmentation Update (Phase 2) ---
+        if TRAIN_ALZ: optimizer_alz.zero_grad()
+        if TRAIN_SEG: optimizer_shared.zero_grad()
+
+        for step in range(max_steps):            
+            if TRAIN_ALZ and alz_loader:
+                try: batch = next(alz_iter)
+                except (StopIteration, TypeError): alz_iter = iter(alz_loader); batch = next(alz_iter)
+                
+                loss = train_step(model, batch, "alzheimer", optimizer_alz, scaler_alz, epoch,
+                                  use_uncertainty=use_uncertainty, use_decision=use_decision,
+                                  ep_decision_weight=ep_decision_weight)
+                if loss is not None:
+                    loss = loss / ACCUM_STEPS
+                    scaler_alz.scale(loss).backward()
+                    
+                    if (step + 1) % ACCUM_STEPS == 0 or step == max_steps - 1:
+                        scaler_alz.unscale_(optimizer_alz)
+                        # Fix 2: Adaptive gradient clipping (looser early for feature formation)
+                        alz_clip = 0.7 if epoch <= 6 else 0.5
+                        torch.nn.utils.clip_grad_norm_(model.alz_encoder.parameters(), alz_clip)
+                        # Fix 4: Removed unscientific gradient noise floor — destroys convergence quality
+                        scaler_alz.step(optimizer_alz)
+                        scaler_alz.update()
+                        optimizer_alz.zero_grad()
+                        
+                    a_losses.append(loss.item() * ACCUM_STEPS)
+
             if TRAIN_SEG:
-                try:
-                    t_batch = next(tumor_iter)
-                    s_batch = next(stroke_iter)
+                # Ensure batch and loss are reset every step to avoid stale metrics
+                loss_t, loss_s = None, None
+                t_batch, s_batch = None, None
+                
+                # Part 6: Balancing Updates — ALZ every step, SEG every 2 steps in Joint Phase
+                # This prevents heavy decoder updates from over-dominating shared encoder gradients.
+                skip_seg = TRAIN_ALZ and (step % 2 != 0)
+                
+                if not skip_seg:
+                    # Change 12: Independent task guards for dataset robustness
+                    if tumor_loader:
+                        try: t_batch = next(tumor_iter)
+                        except (StopIteration, TypeError, AttributeError): tumor_iter = iter(tumor_loader); t_batch = next(tumor_iter)
+                        loss_t = train_step(model, t_batch, "tumor", optimizer_shared, scaler_shared, epoch,
+                                            use_uncertainty=use_uncertainty, use_decision=use_decision,
+                                            ep_decision_weight=ep_decision_weight)
                     
-                    # Outer autocast removed (handled in train_step)
-                    loss_tumor  = train_step(model, t_batch, "tumor", optimizer_shared, scaler_shared, epoch, skip_backward=True)
-                    loss_stroke = train_step(model, s_batch, "stroke", optimizer_shared, scaler_shared, epoch, skip_backward=True)
+                    if stroke_loader:
+                        try: s_batch = next(stroke_iter)
+                        except (StopIteration, TypeError, AttributeError): stroke_iter = iter(stroke_loader); s_batch = next(stroke_iter)
+                        loss_s = train_step(model, s_batch, "stroke", optimizer_shared, scaler_shared, epoch,
+                                            use_uncertainty=use_uncertainty, use_decision=use_decision,
+                                            ep_decision_weight=ep_decision_weight)
                     
-                    if loss_tumor is not None and loss_stroke is not None:
-                        total_seg_loss = loss_tumor + loss_stroke
-                        scaler_shared.scale(total_seg_loss).backward()
+                    losses_to_combine = [l for l in [loss_t, loss_s] if l is not None]
+                    if losses_to_combine:
+                        total_loss = sum(losses_to_combine) / ACCUM_STEPS
+                        scaler_shared.scale(total_loss).backward()
                         
-                        scaler_shared.unscale_(optimizer_shared)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        if (step + 1) % ACCUM_STEPS == 0 or step == max_steps - 1:
+                            scaler_shared.unscale_(optimizer_shared)
+                            shared_params = optimizer_shared.param_groups[0]["params"] + optimizer_shared.param_groups[1]["params"]
+                            # A3: Clip to 0.5 globally
+                            torch.nn.utils.clip_grad_norm_(shared_params, 0.5)
+                            if all(p.grad is None or torch.isfinite(p.grad).all() for p in shared_params):
+                                scaler_shared.step(optimizer_shared)
+                            scaler_shared.update()
+                            optimizer_shared.zero_grad()
                         
-                        scaler_shared.step(optimizer_shared)
-                        scaler_shared.update()
-                        
-                        t_losses.append(loss_tumor.item())
-                        s_losses.append(loss_stroke.item())
-                        
-                        # --- Metrics Logging (CRITICAL Fix) ---
-                        with torch.no_grad():
-                            # Mode flips removed (already in model.train())
-                            
-                            # Tumor Metrics
+                        if loss_t is not None: t_losses.append(loss_t.item())
+                        if loss_s is not None: s_losses.append(loss_s.item())
+                
+                # Training Metrics (Every 10 steps, with batch guards)
+                if step % 10 == 0:
+                    with torch.no_grad():
+                        if t_batch is not None:
                             t_res = model(t_batch["image"].to(DEVICE), active_seg=["tumor"])
-                            t_out = t_res["segmentations"]["tumor"]
-                            et_d  = quick_dice(t_out[:, 0:1], t_batch["seg"][:, 0:1].to(DEVICE))
-                            ncr_d = quick_dice(t_out[:, 1:2], t_batch["seg"][:, 1:2].to(DEVICE))
-                            ed_d  = quick_dice(t_out[:, 2:3], t_batch["seg"][:, 2:3].to(DEVICE))
-                            t_et_dices.append(et_d)
-                            t_ncr_dices.append(ncr_d)
-                            t_ed_dices.append(ed_d)
-                            
-                            # Stroke Metrics
+                            t_probs = torch.sigmoid(t_res["segmentations"]["tumor"])
+                            t_et_dices.append(quick_dice(t_probs[:, 0:1], t_batch["seg"][:, 0:1].to(DEVICE)))
+                            t_ncr_dices.append(quick_dice(t_probs[:, 1:2], t_batch["seg"][:, 1:2].to(DEVICE)))
+                            t_ed_dices.append(quick_dice(t_probs[:, 2:3], t_batch["seg"][:, 2:3].to(DEVICE)))
+
+                        if s_batch is not None:
                             s_res = model(s_batch["image"].to(DEVICE), active_seg=["stroke"])
-                            s_out = s_res["segmentations"]["stroke"]
-                            s_d = quick_dice(s_out, s_batch["seg"].to(DEVICE))
+                            s_d = quick_dice(torch.sigmoid(s_res["segmentations"]["stroke"]), s_batch["seg"].to(DEVICE))
                             s_dices.append(s_d)
-
-                        # First 10 steps startup debug
-                        if epoch == 21 and step < 10:
-                            p_mean = torch.sigmoid(s_out).mean().item()
-                            g_mean = s_batch["seg"].mean().item()
-                            tqdm.write(f"   [P2 Startup Step {step}] Stroke Pred Mean: {p_mean:.4f} | GT Mean: {g_mean:.4f}")
-
-                except (StopIteration, TypeError):
-                    pass
             
             # Print progress every 50 steps
             if (step + 1) % 50 == 0 or step == max_steps - 1:
                 log_parts = [f"  Step {step+1:>4}/{max_steps}"]
-                if TRAIN_SEG:
-                    t_l = np.mean(t_losses[-50:]) if t_losses else 0.0
-                    s_l = np.mean(s_losses[-50:]) if s_losses else 0.0
-                    et_d = np.mean(t_et_dices[-50:]) if t_et_dices else 0.0
-                    s_d  = np.mean(s_dices[-50:]) if s_dices else 0.0
-                    log_parts.append(f"T_L={t_l:.3f} | S_L={s_l:.3f} | ET_D={et_d:.3f} | Str_D={s_d:.3f}")
-                if TRAIN_ALZ:
-                    log_parts.append(f"A_L={np.mean(a_losses[-50:]):.3f}")
+                t_l = np.mean(t_losses[-50:]) if t_losses else 0.0
+                s_l = np.mean(s_losses[-50:]) if s_losses else 0.0
+                et_d = np.mean(t_et_dices[-50:]) if t_et_dices else 0.0
+                s_d  = np.mean(s_dices[-50:]) if s_dices else 0.0
+                log_parts.append(f"T_L={t_l:.3f} | S_L={s_l:.3f} | ET_D={et_d:.3f} | Str_D={s_d:.3f}")
+                log_parts.append(f"A_L={np.mean(a_losses[-50:]):.3f}" if a_losses else "A_L=n/a")
                 tqdm.write(" | ".join(log_parts))
-        
-        # ── Epoch Summary ────────────────────────────────────────────────────
-        if TRAIN_SEG:
-            avg_et  = np.mean(t_et_dices)  if t_et_dices  else 0.0
-            avg_ncr = np.mean(t_ncr_dices) if t_ncr_dices else 0.0
-            avg_ed  = np.mean(t_ed_dices)  if t_ed_dices  else 0.0
-            avg_tumor_mean = (avg_et + avg_ncr + avg_ed) / 3.0
-            avg_stroke = np.mean(s_dices) if s_dices else 0.0
 
-            print(f"  🧠 Tumor  | Loss: {np.mean(t_losses) if t_losses else 0:.4f}")
-            print(f"     ET  Dice : {avg_et:.4f}  ← primary benchmark")
-            print(f"     NCR Dice : {avg_ncr:.4f}")
-            print(f"     ED  Dice : {avg_ed:.4f}")
-            print(f"     Mean     : {avg_tumor_mean:.4f}")
-            print(f"  🩸 Stroke | Loss: {np.mean(s_losses) if s_losses else 0:.4f} | Dice: {avg_stroke:.4f}")
-        
+        # Section J: LOGGING SYSTEM
+        print(f"\n🏁 EPOCH {epoch} SUMMARY")
         if TRAIN_ALZ:
             avg_alz_loss = np.mean(a_losses) if a_losses else 0.0
-            print(f"  🧬 Alz    | Loss: {avg_alz_loss:.4f}")
+            print(f"  🩺 Alzheimer | Loss: {avg_alz_loss:.4f}")
+            with torch.no_grad():
+                batch = next(iter(alz_val_loader))
+                res = model(batch["image"].to(DEVICE), active_presence=["alzheimer"])
+                # res['presence']['alzheimer'] is a single (B,1) tensor after temp scaling
+                logit = res["presence"]["alzheimer"]
+                # Fix #12: Remove batch-size-1 std (always 0.0, misleading)
+                # Real multi-sample std is in the B1+B2 diagnostic block below
+                print(f"     Logit Mean: {logit.mean().item():.3f}")
+                # FIX 4: Prediction monitoring (Diversity Hardening)
+                prob_m = torch.sigmoid(logit).mean().item()
+                print(f"     Pred prob mean: {prob_m:.3f}")
+
+        if TRAIN_SEG:
+            print(f"  🧠 Segmentation Summary (Training Samples)")
+            # Log empty preds % and predicted volume (Section J)
+            if s_dices:
+                print(f"     Stroke | Empty Predictions: {sum(s == 0 for s in s_dices)/len(s_dices):.1%}")
+                print(f"     Stroke | Mean Dice (Fixed 0.5): {np.mean(s_dices):.4f}")
+            if t_et_dices:
+                # Fix 8: Metric labeling honesty (Soft Dice vs. Val Hard Dice)
+                print(f"     Tumor  | ET Soft Dice: {np.mean(t_et_dices):.4f} | WT Soft Dice: {np.mean(t_ed_dices):.4f}")
+
+        # ISSUE 5 FIX: VRAM Edge Guard — clear cache after training loop
+        # Releases stray tensors before validation HD95 which requires heavy memory.
+        torch.cuda.empty_cache()
         sys.stdout.flush()
 
+        # ─── Validation & Metrics History ──────────────────────────────────
         if TRAIN_ALZ:
-            # Alzheimer Validation — full metrics (AUC + Acc + Prec + Rec + F1)
+            # Alzheimer Validation — full metrics (AUC + Brier + ECE)
             alz_metrics = evaluate_alzheimer_full(model, alz_val_loader)
-            alz_auc = alz_metrics["auc"]
+            
+            # Part 5: Sanity heuristic — detect weak learning signal early
+            if epoch >= 5 and alz_metrics["auc"] < 0.55:
+                print("  ⚠️ WARNING: Weak learning signal detected (val_auc < 0.55)")
+            
+            # Change 7: Step Scheduler (AUC-driven)
+            if scheduler_alz is not None:
+                scheduler_alz.step(alz_metrics["auc"])
+                print(f"     Alz LR: {optimizer_alz.param_groups[0]['lr']:.2e}")
 
-            # Append metrics
-            metrics_history["alz_auc"].append(round(alz_auc, 4))
-            metrics_history["alz_accuracy"].append(round(alz_metrics["accuracy"], 4))
-            metrics_history["alz_precision"].append(round(alz_metrics["precision"], 4))
-            metrics_history["alz_recall"].append(round(alz_metrics["recall"], 4))
-            metrics_history["alz_f1"].append(round(alz_metrics["f1"], 4))
+            m = metrics_history["val"]["alz"]
+            m["auc"].append(round(alz_metrics["auc"], 4))
+            m["auprc"].append(round(alz_metrics["auprc"], 4))
+            m["brier"].append(round(alz_metrics["brier"], 4))
+            m["ece"].append(round(alz_metrics["ece"], 4))
+            m["f1"].append(round(alz_metrics["f1"], 4))
+            m["accuracy"].append(round(alz_metrics["accuracy"], 4))
+            m["precision"].append(round(alz_metrics["precision"], 4))
+            m["recall"].append(round(alz_metrics["recall"], 4))
         else:
-            # Pad Alzheimer metrics with last known value
-            last_auc = metrics_history["alz_auc"][-1] if metrics_history["alz_auc"] else 0.0
-            metrics_history["alz_auc"].append(last_auc)
-            metrics_history["alz_accuracy"].append(metrics_history["alz_accuracy"][-1] if metrics_history["alz_accuracy"] else 0.0)
-            metrics_history["alz_precision"].append(metrics_history["alz_precision"][-1] if metrics_history["alz_precision"] else 0.0)
-            metrics_history["alz_recall"].append(metrics_history["alz_recall"][-1] if metrics_history["alz_recall"] else 0.0)
-            metrics_history["alz_f1"].append(metrics_history["alz_f1"][-1] if metrics_history["alz_f1"] else 0.0)
+            # Append None when Alzheimer not trained this epoch
+            for key in ["auc", "auprc", "brier", "ece", "f1", "accuracy", "precision", "recall"]:
+                metrics_history["val"]["alz"][key].append(None)
 
-        # Unified history updates for segmentation
+        if TRAIN_SEG:
+            seg_metrics = evaluate_segmentation_full(
+                model, tumor_val_loader, stroke_val_loader, epoch
+            )
+            run_hd = (epoch % EVAL_HD_EVERY == 0)
+
+            tv = metrics_history["val"]["tumor"]
+            sv = metrics_history["val"]["stroke"]
+
+            def _r(v): return round(v, 4) if (v is not None and not np.isnan(v)) else None
+
+            # Overlap — always available
+            tv["et_dice"].append(_r(seg_metrics["tumor_et_dice"]))
+            tv["tc_dice"].append(_r(seg_metrics["tumor_tc_dice"]))
+            tv["wt_dice"].append(_r(seg_metrics["tumor_wt_dice"]))
+            tv["tc_iou"].append(_r(seg_metrics["tumor_tc_iou"]))
+            tv["wt_iou"].append(_r(seg_metrics["tumor_wt_iou"]))
+            tv["tc_ve"].append(_r(seg_metrics["tumor_tc_ve"]))
+            tv["wt_ve"].append(_r(seg_metrics["tumor_wt_ve"]))
+            sv["dice"].append(_r(seg_metrics["stroke_dice"]))
+            sv["iou"].append(_r(seg_metrics["stroke_iou"]))
+            sv["ve"].append(_r(seg_metrics["stroke_ve"]))
+
+            # Boundary (HD95/ASD) — None when not computed this epoch
+            tv["et_hd95"].append(_r(seg_metrics["tumor_et_hd95"]) if run_hd else None)
+            tv["wt_hd95"].append(_r(seg_metrics["tumor_wt_hd95"]) if run_hd else None)
+            tv["et_asd"].append(_r(seg_metrics["tumor_et_asd"])   if run_hd else None)
+            tv["wt_asd"].append(_r(seg_metrics["tumor_wt_asd"])   if run_hd else None)
+            sv["hd95"].append(_r(seg_metrics["stroke_hd95"]) if run_hd else None)
+            sv["asd"].append(_r(seg_metrics["stroke_asd"])   if run_hd else None)
+        else:
+            # Append None for all seg val metrics when SEG not trained
+            for key in ["et_dice", "tc_dice", "wt_dice",
+                        "tc_iou", "wt_iou", "et_hd95", "wt_hd95",
+                        "et_asd",  "wt_asd",  "tc_ve",   "wt_ve"]:
+                metrics_history["val"]["tumor"][key].append(None)
+            for key in ["dice", "iou", "hd95", "asd", "ve"]:
+                metrics_history["val"]["stroke"][key].append(None)
+
+        # ── Train metrics (Fix 10: Compute actual averages) ───────────────
+        avg_et = np.mean(t_et_dices) if t_et_dices else 0.0
+        avg_tumor_mean = (np.mean(t_et_dices) + np.mean(t_ncr_dices) + np.mean(t_ed_dices))/3 if t_et_dices else 0.0
+        avg_stroke = np.mean(s_dices) if s_dices else 0.0
+        
         metrics_history["epoch"].append(epoch)
-        metrics_history["tumor_et"].append(round(avg_et, 4))
-        metrics_history["tumor_ncr"].append(round(avg_ncr, 4))
-        metrics_history["tumor_ed"].append(round(avg_ed, 4))
-        metrics_history["tumor_mean"].append(round(avg_tumor_mean, 4))
-        metrics_history["stroke_dice"].append(round(avg_stroke, 4))
+        metrics_history["train"]["tumor"]["et_dice"].append(round(avg_et, 4))
+        metrics_history["train"]["tumor"]["mean_dice"].append(round(avg_tumor_mean, 4))
+        metrics_history["train"]["tumor"]["loss"].append(round(float(np.mean(t_losses)) if t_losses else 0.0, 4))
+        metrics_history["train"]["stroke"]["dice"].append(round(avg_stroke, 4))
+        metrics_history["train"]["stroke"]["loss"].append(round(float(np.mean(s_losses)) if s_losses else 0.0, 4))
+        metrics_history["train"]["alz"]["loss"].append(round(float(np.mean(a_losses)) if a_losses else 0.0, 4))
 
-        # ─── Scheduler Step (Removed for stability) ────────────
+        # ── Global composite score ───────────────────────────────────────────────
+        # Score = wt_dice + stroke_dice + (alz_auc - alz_brier) - hd_penalty
+        # During SEG-only phase (ep16-30), alz metrics are None.
+        # Carry forward both AUC and Brier from last Alzheimer validation epoch
+        # so the score stays meaningful and consistent across all phases.
+        wt_dice_ep   = metrics_history["val"]["tumor"]["wt_dice"][-1] or 0.0
+        s_dice_ep    = metrics_history["val"]["stroke"]["dice"][-1]    or 0.0
+
+        _raw_auc   = metrics_history["val"]["alz"]["auc"][-1]
+        _raw_brier = metrics_history["val"]["alz"]["brier"][-1]
+
+        # Carry forward last known values for both metrics
+        past_aucs   = [v for v in metrics_history["val"]["alz"]["auc"]   if v is not None]
+        past_briers = [v for v in metrics_history["val"]["alz"]["brier"] if v is not None]
+        alz_auc_ep   = _raw_auc   if _raw_auc   is not None else (past_aucs[-1]   if past_aucs   else 0.5)
+        alz_brier_ep = _raw_brier if _raw_brier is not None else (past_briers[-1] if past_briers else 0.25)
+
+        wt_hd95_ep = metrics_history["val"]["tumor"]["wt_hd95"][-1]
+        # Soft HD95 penalty: cap at 50mm, scale 0.005 → max deduction 0.25
+        hd_penalty = 0.005 * min(wt_hd95_ep, 50.0) if wt_hd95_ep is not None else 0.0
+
+        # Calibration-aware: AUC - Brier rewards models that are both accurate AND calibrated
+        global_score = round(wt_dice_ep + s_dice_ep + (alz_auc_ep - alz_brier_ep) - hd_penalty, 4)
+        metrics_history["meta"]["score"].append(global_score)
+
+        if metrics_history["meta"]["best_score"] is None or global_score > metrics_history["meta"]["best_score"]:
+            metrics_history["meta"]["best_score"] = global_score
+            metrics_history["meta"]["best_epoch"] = epoch
+            print(f"⭐ New best global score: {global_score:.4f} at epoch {epoch}")
+
         print(f"     LR Shared: {optimizer_shared.param_groups[0]['lr']:.2e} | LR Alz: {optimizer_alz.param_groups[0]['lr']:.2e}")
         
         sys.stdout.flush()
         
-        # Checkpoint — Full (for training resume)
+        # ── Checkpoint: full resume state (FIX 2)
         torch.save({
             "model":    model.state_dict(),
             "optimizer_shared": optimizer_shared.state_dict(),
             "optimizer_alz":    optimizer_alz.state_dict(),
+            "scaler_shared":    scaler_shared.state_dict(),
+            "scaler_alz":       scaler_alz.state_dict(),
             "epoch":    epoch,
             "metrics":  metrics_history,
-        }, CHECKPOINT_DIR / "neurox_checkpoint.pth")
+        }, CHECKPOINT_DIR / "neurox_last.pth")
         
-        # Checkpoint — Inference weights + metrics
+        # ── B1 + B2: Research-Grade Alzheimer Diagnostics ─────────────────
+        if TRAIN_ALZ:
+            model.eval()
+            with torch.no_grad():
+                logits_all = []
+                feats_all  = []
+                for b_i, b in enumerate(alz_val_loader):
+                    if b_i >= 30: break  # B2: 30-sample logit distribution
+                    img_c = b["image"].to(DEVICE)
+                    logit_v, _ = model.alz_encoder(img_c)
+                    logits_all.append(logit_v.cpu())
+                    if b_i < 20:         # B1: 20-sample feature variance
+                        feat_v = model.alz_encoder.extract_features(img_c)
+                        feats_all.append(feat_v.cpu())
+                
+                if logits_all:
+                    all_l  = torch.cat(logits_all)
+                    l_std  = all_l.std().item()
+                    logit_status = "✅ healthy" if l_std > 0.05 else "🚨 COLLAPSED"
+                    print(f"  🔍 Logit Std  (30 val): {l_std:.4f} ({logit_status})")
+                    # Part 3: Learning Enforcement — exit if model collapses after warmup
+                    if l_std < 0.05 and epoch >= 3:
+                        print(f"❌ NOT LEARNING (logit_std={l_std:.4f}) — STOP RUN to prevent wasted time")
+                        break # Exit epoch loop
+                
+                if feats_all:
+                    all_f     = torch.cat(feats_all)
+                    feat_std  = all_f.std().item()
+                    feat_status = "✅ healthy" if feat_std > 0.1 else "🚨 COLLAPSED"
+                    print(f"  🔍 Feature Std (20 val): {feat_std:.4f} ({feat_status})")
+            model.train()
+        
+        # ── Checkpoint: inference weights + structured metrics
         torch.save({
             "model_state": model.state_dict(),
             "metrics":     metrics_history,
         }, CHECKPOINT_DIR / "neurox_model.pth")
+
+        # Fix 7: JSON export safety
+        try:
+            metrics_json_path = CHECKPOINT_DIR / "metrics.json"
+            with open(metrics_json_path, "w") as _jf:
+                json.dump(metrics_history, _jf, default=lambda x: None if x != x else x)
+        except Exception as _je:
+            print(f"⚠️ JSON export failed (non-critical): {_je}")
         
-        print(f"✅ Epoch {epoch} Complete. Checkpoints saved.")
+        print(f"✅ Epoch {epoch} | Score={metrics_history['meta']['score'][-1]:.4f} "
+              f"(Best: {metrics_history['meta']['best_score']:.4f} @ ep{metrics_history['meta']['best_epoch']}). "
+              f"Checkpoints saved.")
+
+        # (Cache flushing disabled natively: preventing massive re-computation pipeline degradation)
+
+    # ── Post-Training: Final Temperature Calibration ────────────────────────
+    # Optimise temperature on Alzheimer val set so inference probabilities are calibrated
+    if alz_val_loader is not None:
+        calibrate_model(model, alz_val_loader)
+        # Re-save neurox_model.pth with calibrated temperature included
+        torch.save({
+            "model_state": model.state_dict(),
+            "metrics":     metrics_history,
+        }, CHECKPOINT_DIR / "neurox_model.pth")
+        print("✅ Calibrated model saved to neurox_model.pth")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CALIBRATION (runs after final epoch, optimises temperature on val set)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def calibrate_model(model, val_loader):
+    """Optimise temperature on the Alzheimer validation set after training.
+    
+    Called at end of main() so temperature is correctly calibrated for inference.
+    Uses raw (uncalibrated) logits as input to Adam — temperature is the param.
+    """
+    print("\n🔥 Optimizing Temperature Scaling on Validation...")
+    model.eval()
+    
+    all_logits = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in val_loader:
+            img = batch["image"].to(DEVICE)
+            logit, _ = model.alz_encoder(img)
+            all_logits.append(logit)
+            all_labels.append(batch["presence"]["alzheimer"].to(DEVICE))
+            
+    all_logits = torch.cat(all_logits)
+    all_labels = torch.cat(all_labels)
+
+    # ✅ Fix 3 — optional safety guard
+    if torch.isnan(all_logits).any():
+        print("❌ NaN logits — skipping calibration")
+        return
+    
+    # Audit Fix 2: Safety guard for empty validation cohorts
+    if all_logits.numel() == 0:
+        print("   ⚠️ Calibration skipped: No validation samples available.")
+        return
+    
+    # Ensure temperature requires grad for optimization
+    model.temperature.requires_grad = True
+    
+    # ✅ Fix 2 — disable LBFGS (recommended)
+    t_optimizer = torch.optim.Adam([model.temperature], lr=1e-2)
+    
+    # Smoothing Alignment: prevents temperature over-shrinking logits due to training smoothing
+    target_smoothed = all_labels * 0.9 + 0.05
+    
+    for _ in range(100):
+        t_optimizer.zero_grad()
+        # ✅ Fix 1 — clamp temperature in calibration
+        temp = model.temperature.clamp(0.01, 10.0)
+        loss = F.binary_cross_entropy_with_logits(all_logits / temp, target_smoothed)
+        loss.backward()
+        t_optimizer.step()
+        
+    print(f"✅ Final Temperature: {model.temperature.item():.4f}")
+    model.train()
 
 if __name__ == "__main__":
     main()
