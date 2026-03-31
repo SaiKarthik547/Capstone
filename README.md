@@ -301,88 +301,79 @@ The system utilizes a dual-path asymmetric architecture designed for high-fideli
 graph TD
     %% ── Style Definitions ──────────────────────────────────────────────────
     classDef input fill:#f5f5f5,stroke:#333,stroke-width:2px;
-    classDef module fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
-    classDef layer fill:#fff,stroke:#333,stroke-width:1px;
-    classDef skip stroke:#fbc02d,stroke-width:2px,stroke-dasharray: 5 5;
-    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+    classDef shared fill:#e1f5fe,stroke:#01579b,stroke-width:2.5px;
+    classDef alz fill:#fff3e0,stroke:#e65100,stroke-width:2.5px;
+    classDef bottle fill:#f3e5f5,stroke:#4a148c,stroke-width:2.5px;
+    classDef heads fill:#e8f5e9,stroke:#2e7d32,stroke-width:1.5px;
+    classDef output fill:#eeeeee,stroke:#616161,stroke-width:2px;
 
-    %% ── Input Layer ────────────────────────────────────────────────────────
-    Input([Input Volume: B × 2 × 96 × 96 × 96]):::input
-    Input -->|Ch0: Alz Preprocessed| AlzEngine
-    Input -->|Ch1: Standard Preprocessed| SharedBackbone
+    %% ── Input Manifold ──────────────────────────────────────────────────────
+    Input_Manifold(["Input Manifold: B × 2 × 96 × 96 × 96"]):::input
+    Input_Manifold ==> Shared_Backbone
+    Input_Manifold ==> Alzheimer_Backbone
 
-    subgraph SharedBackbone ["Shared Backbone (Tumor & Stroke)"]
+    subgraph Shared_Backbone ["Standard Clinical Backbone (Tumor/Stroke)"]
         direction TB
-        SharedEnc["SharedEncoder (3D-UNet Encoder)"]
-        SharedEnc --> EncStage1["Stage 1: Conv-IN-ReLU x2 (32 feat | 96³)"]
-        EncStage1 --> Pool1["MaxPool3d (Stride 2)"]
-        Pool1 --> EncStage2["Stage 2: Conv-IN-ReLU x2 (64 feat | 48³)"]
-        EncStage2 --> Pool2["MaxPool3d (Stride 2)"]
-        Pool2 --> EncStage3["Stage 3: Conv-IN-ReLU x2 (128 feat | 24³)"]
-        EncStage3 --> Pool3["MaxPool3d (Stride 2)"]
+        subgraph Stage_1 ["Encoder Stage 1 (96³ )"]
+            Shared_Enc_1["[Conv3d(2→32), IN, ReLU] ×2"]
+        end
+        subgraph Stage_2 ["Encoder Stage 2 (48³ )"]
+            Shared_Enc_2["[Conv3d(32→64), IN, ReLU] ×2"]
+        end
+        subgraph Stage_3 ["Encoder Stage 3 (24³ )"]
+            Shared_Enc_3["[Conv3d(64→128), IN, ReLU] ×2"]
+        end
+        Shared_Enc_1 --- Pool_1[MaxPool3d s=2] --- Shared_Enc_2
+        Shared_Enc_2 --- Pool_2[MaxPool3d s=2] --- Shared_Enc_3
+    end
+    Shared_Backbone:::shared
+
+    subgraph Alzheimer_Backbone ["Independent Alzheimer Backbone (RE-SE)"]
+        direction TB
+        Alz_B1["ResBlock 1: 1→32 (48³ )"] --- Alz_B2["ResBlock 2: 32→64 (24³ )"]
+        Alz_B2 --- Alz_B3["ResBlock 3: 64→128 (12³ )"]
+        Alz_B3 --- Alz_B4["ResBlock 4: 128→256 (12³ )"]
+        Alz_B4 --- SE_Block["Squeeze-Excitation (SE) Block"]
+    end
+    Alzheimer_Backbone:::alz
+
+    subgraph Transformer_Unit ["Latent Transformer Bottleneck (12³ Tokens)"]
+        direction TB
+        Pool_3[MaxPool3d s=2] --- Reshape_In["Flatten (1728 seq)"]
+        Shared_Enc_3 --- Pool_3
+        Reshape_In --- MHA_FFN["4× [Multi-Head Attention (8) | FFN (256)]"]
+        MHA_FFN --- Reshape_Out["Reshape (B × 128 × 12³ )"]
+    end
+    Transformer_Unit:::bottle
+
+    subgraph Decoding_Manifold ["Task-Specific Decoding Manifold"]
+        direction LR
+        subgraph Spatial_Decoders ["Spatial ROI Reconstruction"]
+            Dec_Stage_3["Up3 + AG3 + Conv3d 256→128 (24³ )"]
+            Dec_Stage_2["Up2 + AG2 + Conv3d 128→64 (48³ )"]
+            Dec_Stage_1["Up1 + AG1 + Conv3d 64→32 (96³ )"]
+            Dec_Stage_3 --- Dec_Stage_2 --- Dec_Stage_1
+        end
         
-        subgraph TransformerBottleneck ["Transformer Bottleneck (12³ tokens)"]
-            direction TB
-            Pool3 --> ReshapeIn["Flatten to Seq (1728 x 128)"]
-            ReshapeIn --> MHA["Multi-Head Attention (8 heads | depth 4)"]
-            MHA --> FFN["Feed-Forward (GELU | MLP-256)"]
-            FFN --> ReshapeOut["Reshape to 3D (B x 128 x 12³ )"]
+        subgraph Probabilistic_Heads ["Clinical Presence Heads"]
+            Tumor_Pres["Tumor Presence (logit + log_var)"]
+            Stroke_Pres["Stroke Presence (logit + log_var)"]
+            Alzheimer_Pres["AD Classification (logit + log_var)"]
         end
     end
+    Decoding_Manifold:::heads
 
-    subgraph SegDecoder ["Segmentation Decoder (ROI Reconstructor)"]
-        direction TB
-        ReshapeOut --> Up3["Up-Sample 3 (12³ → 24³)"]
-        Up3 --> Att3["Attention Gate 3 (Skip @ 24³)"]
-        Att3 --> Dec3["ConvBlock 3 (256 → 128)"]
-        
-        Dec3 --> Up2["Up-Sample 2 (24³ → 48³)"]
-        Up2 --> Att2["Attention Gate 2 (Skip @ 48³)"]
-        Att2 --> Dec2["ConvBlock 2 (128 → 64)"]
-        
-        Dec2 --> Up1["Up-Sample 1 (48³ → 96³)"]
-        Up1 --> Att1["Attention Gate 1 (Skip @ 96³)"]
-        Att1 --> Dec1["ConvBlock 1 (64 → 32)"]
-        
-        Dec1 --> SegHead["Output Head (Conv3d 1x1x1)"]
-    end
+    %% ── Skip-Connection Manifolds ───────────────────────────────────────────
+    Shared_Enc_3 -.-|enc3: 24³ | Dec_Stage_3
+    Shared_Enc_2 -.-|enc2: 48³ | Dec_Stage_2
+    Shared_Enc_1 -.-|enc1: 96³ | Dec_Stage_1
 
-    %% Skip Connections
-    EncStage1 -.->|enc1 skip| Att1:::skip
-    EncStage2 -.->|enc2 skip| Att2:::skip
-    EncStage3 -.->|enc3 skip| Att3:::skip
-
-    subgraph PresenceEngine ["Presence & Uncertainty Heads"]
-        direction TB
-        ReshapeOut --> GlobalPool["Global Avg Pool"]
-        GlobalPool --> FC1["Hidden Layer (64)"]
-        FC1 --> tumor_presence["Tumor Head (logit, log_var)"]
-        FC1 --> stroke_presence["Stroke Head (logit, log_var)"]
-    end
-
-    subgraph AlzEngine ["Alzheimer Engine (Independent ResNet-SE)"]
-        direction TB
-        AlzRes1["ResBlock 1 (32 | 48³ )"] --> AlzRes2["ResBlock 2 (64 | 24³ )"]
-        AlzRes2 --> AlzRes3["ResBlock 3 (128 | 12³ )"]
-        AlzRes3 --> AlzRes4["ResBlock 4 (256 | 12³ )"]
-        AlzRes4 --> SE["SE-Attention Block"]
-        SE --> AlzFlatten["Feature Concat (Avg+Max)"]
-        AlzFlatten --> alz_encoder["AD Classifier (512 → 1)"]
-        AlzFlatten --> alz_uncertainty["Log-Var Head (Uncertainty)"]
-    end
-
-    subgraph ClinicalFusion ["Clinical Decision Engine"]
-        direction TB
-        DecisionFeats["Metadata: [prob, unc, vol, entropy, conf]"] --> DecisionMLP["DecisionHead (32 → 1)"]
-    end
-
-    %% Final Outputs
-    SegHead --> output_masks([Diagnostic Mask Volumes]):::output
-    tumor_presence --> report([Report Engine]):::output
-    stroke_presence --> report
-    alz_encoder --> report
-    DecisionMLP --> report
-    alz_uncertainty --> report
+    %% ── Global Decision Fusion ──────────────────────────────────────────────
+    Fused_Report(["Clinical Whiteboard Engine (MLP-Fusion)"]):::output
+    
+    Reshape_Out ==> Decoding_Manifold
+    Alz_Backbone ==> Alzheimer_Pres
+    Decoding_Manifold ==> Fused_Report
 ```
 
 ---
