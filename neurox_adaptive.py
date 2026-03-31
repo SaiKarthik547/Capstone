@@ -1557,59 +1557,69 @@ def create_slice_view(
     return fig
 
 
-# =========================================================================
-# GLOBAL RESOURCE CACHE: ZERO-REGENERATION 3D ASSETS
-# =========================================================================
 @st.cache_resource(show_spinner=False)
-def get_viz_asset_pack(file_hash, raw_nifti_bytes, disease, disease_name, single_seg_data, roi_metadata, affine, spacing, lesion_metrics, model_path):
+def get_visualization_assets(
+    file_hash: str,
+    raw_nifti_bytes: bytes,
+    disease: str,
+    disease_name: str,
+    single_seg_data: Dict,
+    roi_metadata: Dict,
+    affine: np.ndarray,
+    spacing: Tuple[float, float, float],
+    lesion_metrics: Optional[Dict],
+    model_path: Path
+) -> go.Figure:
     """
-    ULTRA-PERSISTENT: Generates all 3D assets in a single global cache.
-    Guarantees zero-regeneration on UI reruns (like 'Finalize Export').
-    """
-    print(f"\n🚀 [GLOBAL CACHE] Generating persistent 3D assets for: {disease_name}")
+    Generates and caches 3D interactive visualization assets.
     
-    # Setup temporary file for one-shot NIfTI lifecycle
-    import tempfile
+    This function uses @st.cache_resource to ensure that expensive 3D mesh
+    generation and HD-BET brain extraction only run once per patient/file.
+    
+    Args:
+        file_hash: Unique identifier for the patient scan.
+        raw_nifti_bytes: Raw bytes of the NIfTI MRI scan.
+        disease: internal key for the detected disease.
+        disease_name: Human-readable name of the disease.
+        single_seg_data: Dictionary containing segmentation masks and scores.
+        roi_metadata: Spatial metadata for upsampling ROI to original space.
+        affine: 4x4 affine matrix of the original scan.
+        spacing: Voxel spacing of the original scan.
+        lesion_metrics: Quantitative analytical measurements.
+        model_path: Path to the trained checkpoint for weight loading.
+        
+    Returns:
+        plotly.graph_objects.Figure: The interactive 3D scene (Solid Mesh View).
+    """
+    print(f"\n🚀 [ASSET PIPE] Generating persistent 3D scene for: {disease_name}")
+    
+    # One-shot NIfTI lifecycle for mesh generation
     with tempfile.NamedTemporaryFile(delete=False, suffix=".nii.gz") as tmp_raw:
         tmp_raw.write(raw_nifti_bytes)
         active_viz_path = tmp_raw.name
     
     try:
-        # Load model for one-shot meshes
+        # Load local model weight copy for mesh alignment verification
         local_model = load_model(model_path)
         
-        # 1. Patient Figure (Solid)
-        fig_pat = create_3d_visualization(
+        # PRIMARY ASSET: Interactive solid-mesh patient reconstructio
+        fig_patient = create_3d_visualization(
             file_path=active_viz_path,
             segmentations_roi=single_seg_data,
             roi_metadata=roi_metadata,
-            affine=affine, spacing=spacing,
+            affine=affine, 
+            spacing=spacing,
             show_patient_brain=True,
-            show_heatmap=False,
+            show_heatmap=False,  # REQ: No heatmap in UI
             lesion_metrics=lesion_metrics,
             model=local_model,
             file_hash=file_hash
         )
         
-        # 2. Heatmap Export Figure
-        fig_exp = create_3d_visualization(
-            file_path=active_viz_path,
-            segmentations_roi=single_seg_data,
-            roi_metadata=roi_metadata,
-            affine=affine, spacing=spacing,
-            show_patient_brain=True,
-            show_heatmap=True,
-            lesion_metrics=lesion_metrics,
-            model=local_model,
-            file_hash=file_hash
-        )
-        fig_exp.update_layout(title=f"NeuroX Clinical Analysis: {disease_name.upper()} HEATMAP")
+        return fig_patient
         
-        return {
-            'fig_pat': fig_pat,
-            'fig_exp': fig_exp
-        }
     finally:
+        # Prevent temporary file leakage
         if os.path.exists(active_viz_path):
             os.unlink(active_viz_path)
 
@@ -2157,6 +2167,229 @@ def create_3d_visualization(
     )
     
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MATPLOTLIB 2D HEATMAP GENERATOR (HIGH-RES PNG, NO PLOTLY DEPENDENCY)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False)
+def generate_matplotlib_heatmap_png(
+    probs_roi_bytes: bytes,
+    probs_roi_shape: tuple,
+    probs_roi_dtype_str: str,
+    roi_metadata_original_shape: tuple,
+    roi_metadata_roi_affine: list,
+    roi_metadata_original_affine: list,
+    disease: str,
+    disease_name: str,
+    dpi: int = 200
+) -> bytes:
+    """
+    Generate a true 2D multi-slice probability heatmap as high-res PNG bytes.
+
+    Uses matplotlib only — fully independent of Plotly/kaleido.
+    Cached by st.cache_data so repeated calls (reruns) return instantly
+    without re-generating or touching any other session state.
+
+    Args:
+        probs_roi_bytes: Raw bytes of the probability array (from np.tobytes()).
+        probs_roi_shape: Shape tuple of the probability array.
+        probs_roi_dtype_str: dtype string (e.g. 'float32').
+        roi_metadata_original_shape: original_shape from roi_metadata.
+        roi_metadata_roi_affine: roi_affine as nested list (JSON-serializable).
+        roi_metadata_original_affine: original_affine as nested list.
+        disease: Disease key string ('tumor', 'stroke', 'alzheimer').
+        disease_name: Human-readable disease name.
+        dpi: Output resolution (200 = ~3200x2000 for A4).
+
+    Returns:
+        PNG bytes suitable for st.download_button.
+    """
+    import io
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from matplotlib.colors import LinearSegmentedColormap
+
+    # --- 1. Reconstruct arrays from cache-safe primitives ---
+    probs_roi = np.frombuffer(probs_roi_bytes, dtype=np.dtype(probs_roi_dtype_str)).reshape(probs_roi_shape).copy()
+    original_shape = tuple(roi_metadata_original_shape)
+
+    # --- 2. Collapse multi-channel (tumor ET/NCR/ED) to single probability map ---
+    if probs_roi.ndim == 4:
+        if disease == "tumor":
+            p_single = np.maximum.reduce([probs_roi[0], probs_roi[1], probs_roi[2]])
+        else:
+            p_single = probs_roi.max(axis=0)
+    else:
+        p_single = probs_roi.copy()
+
+    # --- 3. Upsample ROI prob map to original image space ---
+    p_tensor = torch.from_numpy(p_single.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+    p_original = F.interpolate(
+        p_tensor,
+        size=original_shape,
+        mode='trilinear',
+        align_corners=False
+    ).squeeze().numpy()  # shape: original_shape
+
+    # --- 4. Pick representative slices (center of mass of high-prob region) ---
+    threshold_mask = p_original > 0.3
+    if threshold_mask.sum() > 10:
+        coords = np.argwhere(threshold_mask)
+        center = coords.mean(axis=0).astype(int)
+    else:
+        center = np.array([s // 2 for s in original_shape])
+
+    ax_idx  = int(np.clip(center[2], 0, original_shape[2] - 1))  # Axial   (z)
+    cor_idx = int(np.clip(center[1], 0, original_shape[1] - 1))  # Coronal (y)
+    sag_idx = int(np.clip(center[0], 0, original_shape[0] - 1))  # Sagittal(x)
+
+    # Collect ±2 slices around center for context strip
+    def _safe_slices(center_v, max_v, n=5):
+        half = n // 2
+        idxs = [center_v + i for i in range(-half, half + 1)]
+        return [max(0, min(max_v - 1, i)) for i in idxs]
+
+    ax_slices  = _safe_slices(ax_idx,  original_shape[2], n=5)
+    cor_slices = _safe_slices(cor_idx, original_shape[1], n=5)
+    sag_slices = _safe_slices(sag_idx, original_shape[0], n=5)
+
+    # --- 5. Disease color config ---
+    _DISEASE_COLORS = {
+        "tumor":     {"rgb": [255, 68, 68],   "name": "Tumor"},
+        "stroke":    {"rgb": [68, 68, 255],   "name": "Stroke"},
+        "alzheimer": {"rgb": [255, 136, 0],   "name": "Alzheimer Pattern"},
+    }
+    d_cfg   = _DISEASE_COLORS.get(disease, {"rgb": [0, 229, 255], "name": disease_name})
+    d_rgb   = [c / 255.0 for c in d_cfg["rgb"]]
+    d_cmap  = LinearSegmentedColormap.from_list(
+        f"{disease}_heatmap",
+        [(0, 0, 0, 0), (*d_rgb, 0.3), (*d_rgb, 0.85), (1, 1, 1, 1)],
+        N=256
+    )
+
+    # --- 6. Build figure ---
+    # Layout: 3 rows (Axial / Coronal / Sagittal), 5 columns (strip), + colorbar column
+    BG    = '#030712'
+    TITLE = '#00E5FF'
+    LABEL = '#94A3B8'
+
+    fig = plt.figure(figsize=(22, 14), facecolor=BG)
+    fig.patch.set_facecolor(BG)
+
+    outer = gridspec.GridSpec(
+        4, 1,
+        figure=fig,
+        hspace=0.35,
+        height_ratios=[0.6, 3, 3, 3]
+    )
+
+    # --- Title Row ---
+    ax_title = fig.add_subplot(outer[0])
+    ax_title.set_facecolor(BG)
+    ax_title.axis('off')
+    ax_title.text(
+        0.5, 0.65,
+        f"NeuroX  ·  {disease_name.upper()} Probability Heatmap",
+        ha='center', va='center',
+        fontsize=22, fontweight='bold', color=TITLE,
+        fontfamily='monospace',
+        transform=ax_title.transAxes
+    )
+    ax_title.text(
+        0.5, 0.15,
+        "RESEARCH & EDUCATIONAL USE ONLY — NOT FOR CLINICAL DIAGNOSIS",
+        ha='center', va='center',
+        fontsize=9, color='#FF8800',
+        transform=ax_title.transAxes
+    )
+
+    def _render_strip(row_gs, slices_list, vol_3d, axis_label, axis_dim):
+        """Render a 5-slice strip for one view axis."""
+        inner = gridspec.GridSpecFromSubplotSpec(
+            1, 6,
+            subplot_spec=row_gs,
+            wspace=0.04,
+            width_ratios=[1, 1, 1, 1, 1, 0.06]
+        )
+        for col_i, sl_idx in enumerate(slices_list):
+            ax = fig.add_subplot(inner[0, col_i])
+            ax.set_facecolor('#000000')
+
+            # Extract 2D slice
+            if axis_dim == 2:   slc = vol_3d[:, :, sl_idx]
+            elif axis_dim == 1: slc = vol_3d[:, sl_idx, :]
+            else:               slc = vol_3d[sl_idx, :, :]
+
+            slc_rot = np.rot90(slc, k=1)
+
+            # Grayscale base (normalized prob as grayscale for context)
+            ax.imshow(slc_rot, cmap='gray', vmin=0, vmax=1,
+                      origin='upper', interpolation='bilinear', aspect='auto')
+            # Heatmap overlay
+            im = ax.imshow(slc_rot, cmap=d_cmap, vmin=0, vmax=1,
+                           alpha=0.85, origin='upper',
+                           interpolation='bilinear', aspect='auto')
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#1E293B')
+                spine.set_linewidth(0.5)
+
+            # Slice index label
+            ax.set_xlabel(f"Slice {sl_idx}", color=LABEL, fontsize=7, labelpad=2)
+
+            # Center slice highlight
+            if col_i == len(slices_list) // 2:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor(TITLE)
+                    spine.set_linewidth(2.0)
+
+        # Colorbar
+        cbar_ax = fig.add_subplot(inner[0, 5])
+        cbar_ax.set_facecolor(BG)
+        sm = plt.cm.ScalarMappable(cmap=d_cmap, norm=plt.Normalize(vmin=0, vmax=1))
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cbar_ax)
+        cb.ax.yaxis.set_tick_params(color=LABEL, labelsize=7)
+        cb.outline.set_edgecolor('#1E293B')
+        plt.setp(cb.ax.yaxis.get_ticklabels(), color=LABEL)
+        cb.set_label('Probability', color=LABEL, fontsize=8, labelpad=4)
+
+        # Row label
+        row_label_ax = fig.add_subplot(inner[0, 0])
+        row_label_ax.set_facecolor(BG)
+        row_label_ax.text(
+            -0.18, 0.5, axis_label,
+            ha='center', va='center',
+            fontsize=11, fontweight='bold',
+            color=TITLE,
+            rotation=90,
+            transform=row_label_ax.transAxes
+        )
+
+    _render_strip(outer[1], ax_slices,  p_original, "AXIAL",    2)
+    _render_strip(outer[2], cor_slices, p_original, "CORONAL",  1)
+    _render_strip(outer[3], sag_slices, p_original, "SAGITTAL", 0)
+
+    # --- 7. Save to bytes ---
+    buf = io.BytesIO()
+    fig.savefig(
+        buf,
+        format='png',
+        dpi=dpi,
+        facecolor=BG,
+        bbox_inches='tight',
+        pad_inches=0.3
+    )
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 def create_volume_rendering(
@@ -3625,7 +3858,7 @@ def run_streamlit_app():
                 
                 # LAYER 1: Integrated Global Cache retrieval via @st.cache_resource
                 # This ensures absolute zero-regeneration of meshes/HD-BET on UI interaction
-                asset_pack = get_viz_asset_pack(
+                fig_patient = get_visualization_assets(
                     file_hash=st.session_state.file_hash,
                     raw_nifti_bytes=st.session_state.raw_nifti_bytes,
                     disease=disease,
@@ -3638,51 +3871,62 @@ def run_streamlit_app():
                     model_path=MODEL_PATH # Pass path to keep cache serializable
                 )
                 
-                fig_pat = asset_pack['fig_pat']
-                fig_exp = asset_pack['fig_exp']
-                
-                if fig_pat and len(fig_pat.data) > 0:
+                if fig_patient and len(fig_patient.data) > 0:
                     st.markdown(f"### 🧬 Clinical Visualization: {disease_name}")
-                    st.plotly_chart(fig_pat, use_container_width=True, key=f"viz_pat_{disease}")
+                    st.plotly_chart(fig_patient, use_container_width=True, key=f"viz_full_{disease}")
 
-                    # 🔥 CLINICAL EXPORT (On-Demand High-Res Generation)
+                    # 🔥 CLINICAL EXPORT — Single-button instant download (no rerun, no interference)
                     st.markdown("---")
                     exp_col1, exp_col2 = st.columns([3, 1])
-                    
+
                     with exp_col1:
-                        st.info("📡 **High-Resolution Pipeline**: Preparation of 3200x2000 heatmap for clinical records.")
-                        
+                        st.info(
+                            "📊 **Multi-Slice Probability Heatmap** · Axial / Coronal / Sagittal "
+                            "· High-res PNG (200 DPI) · Instant download, no page reload."
+                        )
+
                     with exp_col2:
-                        # Check if export is already in session state or on disk
-                        export_key = f"bytes_{disease}_{st.session_state.file_hash}"
-                        export_ready = export_key in st.session_state
-                        
-                        if not export_ready:
-                            if st.button(f"⚙️ Finalize Export", key=f"btn_prep_{disease}", use_container_width=True):
-                                with st.spinner("🚀 Stability Mode: Generating Clinical Heatmap PNG (1080p)..."):
-                                    try:
-                                        # Use cached fig_exp to generate bytes at stable 1080p resolution
-                                        h_bytes = fig_exp.to_image(format="png", width=1920, height=1080)
-                                        st.session_state[export_key] = h_bytes
-                                        
-                                        # PERSISTENT STORAGE (Requirement #3)
-                                        export_dir = BASE_DIR / "exports"
-                                        export_dir.mkdir(exist_ok=True)
-                                        export_path = export_dir / f"NeuroX_{disease}_{st.session_state.file_hash}_heatmap.png"
-                                        with open(export_path, "wb") as f:
-                                            f.write(h_bytes)
-                                        print(f"💾 Persistent export saved: {export_path}")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Export failed: {e}")
-                                        print(f"❌ Export error: {e}")
-                        else:
+                        # Build cache-safe primitives ONCE from already-unpacked probs_roi
+                        # probs_roi is already available from the unpack block above (line ~3606)
+                        _p = probs_roi.astype(np.float32)
+                        _p_bytes = _p.tobytes()
+                        _p_shape = _p.shape
+                        _p_dtype = str(_p.dtype)
+
+                        _roi_meta = st.session_state.roi_metadata
+                        _orig_shape_tuple = tuple(int(x) for x in _roi_meta["original_shape"])
+
+                        # roi_affine may be ndarray or None
+                        _roi_affine_raw = _roi_meta.get("roi_affine")
+                        _orig_affine_raw = _roi_meta.get("original_affine")
+                        _roi_affine_list  = _roi_affine_raw.tolist()  if isinstance(_roi_affine_raw, np.ndarray)  else (_roi_affine_raw if _roi_affine_raw is not None else np.eye(4).tolist())
+                        _orig_affine_list = _orig_affine_raw.tolist() if isinstance(_orig_affine_raw, np.ndarray) else (_orig_affine_raw if _orig_affine_raw is not None else np.eye(4).tolist())
+
+                        # generate_matplotlib_heatmap_png is @st.cache_data — returns instantly on reruns
+                        try:
+                            heatmap_png_bytes = generate_matplotlib_heatmap_png(
+                                probs_roi_bytes=_p_bytes,
+                                probs_roi_shape=_p_shape,
+                                probs_roi_dtype_str=_p_dtype,
+                                roi_metadata_original_shape=_orig_shape_tuple,
+                                roi_metadata_roi_affine=_roi_affine_list,
+                                roi_metadata_original_affine=_orig_affine_list,
+                                disease=disease,
+                                disease_name=disease_name,
+                                dpi=200
+                            )
+                        except Exception as _hm_err:
+                            heatmap_png_bytes = None
+                            st.warning(f"⚠️ Heatmap generation failed: {_hm_err}")
+                            print(f"❌ Heatmap error: {_hm_err}")
+
+                        if heatmap_png_bytes is not None:
                             st.download_button(
-                                label=f"📥 Download PNG",
-                                data=st.session_state[export_key],
-                                file_name=f"NeuroX_{disease}_Heatmap_HighRes.png",
+                                label="📥 Download Heatmap",
+                                data=heatmap_png_bytes,
+                                file_name=f"NeuroX_{disease}_Heatmap_{st.session_state.file_hash[:8]}.png",
                                 mime="image/png",
-                                key=f"dl_ready_{disease}",
+                                key=f"dl_heatmap_{disease}_{st.session_state.file_hash}",
                                 use_container_width=True
                             )
                     
