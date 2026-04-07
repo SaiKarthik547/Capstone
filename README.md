@@ -369,7 +369,7 @@ graph TD
     Reshape_Out ==> Spatial_Decoders
     Reshape_Out ==> Tumor_Pres
     Reshape_Out ==> Stroke_Pres
-    Alzheimer_Backbone ==> Alzheimer_Pres ["Transformer Bypass Route"]
+    Alzheimer_Backbone ==>|Transformer Bypass Route| Alzheimer_Pres
     Decoding_Manifold ==> Fused_Report
 ```
 
