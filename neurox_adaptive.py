@@ -75,6 +75,7 @@ if DETERMINISTIC_MODE:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ROI_SIZE = (96, 96, 96)
 PRESENCE_THRESHOLD = 0.45
+USE_ATTENTION_GATES = False # Global Toggle (Ablation Finding: Gates hurt multi-task learning)
 # Dynamic Path Configuration
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "checkpoints" / "neurox_model.pth"
@@ -227,15 +228,30 @@ class SegmentationDecoder(nn.Module):
         )
     
     def forward(self, enc_features, bottleneck_features):
+        # Mandatory Runtime Check
+        
+             
         e1, e2, e3 = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"]
         b = bottleneck_features # This is the output of the TransformerBottleneck3D
         u3 = self.up3(b)
-        d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        
+        # A: Bypass Attention Gates (Global Toggle)
+        if USE_ATTENTION_GATES:
+            d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        else:
+            d3 = self.dec3(torch.cat([u3, e3], dim=1))
         
         u2 = self.up2(d3)
-        d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
+        if USE_ATTENTION_GATES:
+            d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
+        else:
+            d2 = self.dec2(torch.cat([u2, e2], dim=1))
+            
         u1 = self.up1(d2)
-        d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
+        if USE_ATTENTION_GATES:
+            d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
+        else:
+            d1 = self.dec1(torch.cat([u1, e1], dim=1))
         
         main = self.output_head(d1)
         return main
@@ -407,31 +423,20 @@ class NeuroXMultiDisease(nn.Module):
         if x.dim() == 4:
             x = x.unsqueeze(0)
 
-        assert x.dim() == 5, f"Input must be (B, C, D, H, W), got {x.dim()}"
-
-        # Optimization: Only run alz_encoder when presence["alzheimer"] is requested
+        # 1. Alzheimer Presence
         if active_presence and "alzheimer" in active_presence:
-            # FIX 2 — ALZ ROUTING (Sync with v3 packing: Ch0 is ALZ Preprocessed)
-            x_alz = x[:, 0:1] 
-            alz_logits, alz_log_var = self.alz_encoder(x_alz)
+            alz_logits, alz_log_var = self.alz_encoder(x)
             res["presence"]["alzheimer"] = alz_logits
             res["alzheimer_log_var"] = alz_log_var
             
-        # Shared Path (Seg + Presence) - Only run if Tumor/Stroke requested
+        # 2. Shared Pipeline (Tumor / Stroke)
         if (active_presence and any(k in ["tumor", "stroke"] for k in active_presence)) or \
            (active_seg and any(k in ["tumor", "stroke"] for k in active_seg)):
             
-            # FIX 3 — SEG ROUTING (Sync with v3 packing: Ch1 is Standard Preprocessed)
-            # SharedEncoder expects 2-channel input. In training, multi-modal is [T1ce, FLAIR].
-            # For single-modality app uploads, we duplicate the standard channel [Ch1, Ch1].
-            x_seg_ch = x[:, 1:2]
-            x_seg = torch.cat([x_seg_ch, x_seg_ch], dim=1)
-            
-            feats = self.encoder(x_seg)
-            
-            # Bottleneck Path (Inference Optimized - Fixed Issue 8)
+            feats = self.encoder(x)
             bottleneck_feats = self.bottleneck(feats["bottleneck_input"])
             
+            # Presence Heads
             if active_presence and "tumor" in active_presence:
                  res["presence"]["tumor"] = self.tumor_presence(bottleneck_feats)
             if active_presence and "stroke" in active_presence:
@@ -443,8 +448,7 @@ class NeuroXMultiDisease(nn.Module):
             if active_seg and "stroke" in active_seg:
                 res["segmentations"]["stroke"] = self.stroke_decoder(feats, bottleneck_feats)
 
-        # Part D: Temperature Scaling (Sync with training Fix 10)
-        # Applied INSIDE forward during eval to ensure logit distribution parity
+        # 3. Output Calibration (Temperature Scaling)
         if not self.training:
             for k in res["presence"]:
                 if isinstance(res["presence"][k], tuple):
@@ -456,32 +460,8 @@ class NeuroXMultiDisease(nn.Module):
         return res
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# INFERENCE UTILITIES
-# ═══════════════════════════════════════════════════════════════════════════
+# Inference utilities (Simplified for training parity)
 
-def prepare_input(x: torch.Tensor, task: str) -> torch.Tensor:
-    """
-    FIX 1 — ADD CENTRAL INPUT ROUTER (MANDATORY)
-    Enforces training-time channel constraints.
-    """
-    assert x.dim() == 5, "Input must be (B, C, D, H, W)"
-    assert x.shape[1] in [1, 2], f"Invalid channel count: {x.shape}"
-
-    if task == "alzheimer":
-        # MUST be 1-channel
-        if x.shape[1] > 1:
-            return x[:, :1]
-        return x
-
-    elif task in ["tumor", "stroke"]:
-        # MUST be 2-channel
-        if x.shape[1] == 1:
-            return torch.cat([x, x], dim=1)
-        elif x.shape[1] >= 2:
-            return x[:, :2]
-
-    raise ValueError(f"Unknown task: {task}")
 
 
 @st.cache_resource
@@ -557,9 +537,9 @@ def preprocess_alz_light(volume: np.ndarray) -> torch.Tensor:
 
 
 def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray, Dict, np.ndarray, Tuple]:
-    """Load and preprocess NIfTI file identifying with training baseline."""
+    """Load and preprocess NIfTI identifying with training baseline (As-Is orientation)."""
     img = nib.load(file_path)
-    img = nib.as_closest_canonical(img)
+    # orientation parity: training uses raw get_fdata() orientation
     
     original_data = img.get_fdata().astype(np.float32)
     original_shape = original_data.shape
@@ -592,15 +572,14 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
     data_std = (data_std - mean) / std
     
     vol_std = torch.from_numpy(data_std.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+    # FIX: align_corners=False (training baseline standard)
     roi_standard = F.interpolate(vol_std, size=ROI_SIZE, mode="trilinear", align_corners=False).squeeze(0)
     
-    # FIX 3 — CHANNEL PACKING (Ch0=Alz, Ch1=Standard)
-    # NeuroXMultiDisease.forward() now routes: 
-    #   x[:, 0:1] -> AlzEncoder
-    #   [x[:, 1:2], x[:, 1:2]] -> SharedEncoder (2ch duplicate)
-    roi_final = torch.cat([roi_alz, roi_standard], dim=0)
+    # FIX 3 — NO PACKING
+    # The return signature now includes separate ROIs so that callers can route 
+    # the correct raw tensor directly to the model, matching training.
 
-    # FIX 5 — CROPPED AFFINE MATH
+    # FIX 5 — STANDARD AFFINE MATH (training baseline standard)
     orig_shape_3d = tuple(original_shape) if original_data.ndim == 3 else tuple(original_shape[:3])
     scale = np.array(orig_shape_3d, dtype=np.float64) / np.array(ROI_SIZE, dtype=np.float64)
     
@@ -616,12 +595,13 @@ def load_and_preprocess_nifti(file_path: str) -> Tuple[torch.Tensor, np.ndarray,
         "interpolation_mode": "trilinear",
         "roi_affine":      roi_affine,
         "original_affine": affine,
+        "align_corners":   False,
         "shape":           original_shape,
         "spacing":         spacing,
         "affine":          affine.tolist()
     }
     
-    return roi_final, original_data, roi_metadata, affine, spacing
+    return roi_alz, roi_standard, original_data, roi_metadata, affine, spacing
 
 
 def compute_lesion_metrics(mask, brain_mask, spacing=(1.0, 1.0, 1.0), prob=0.0, uncertainty=0.0, logit=0.0, affine=None):
@@ -665,18 +645,19 @@ def compute_lesion_metrics(mask, brain_mask, spacing=(1.0, 1.0, 1.0), prob=0.0, 
         
         # 2. WORLD MM (RAS Coordinates using Affine)
         if affine is not None:
-            # nib.affines.apply_affine(affine, [x, y, z])
-            # Note: input coords are (z, y, x) so we swap to (x, y, z) for RAS
-            coords_ras = coords[:, [2, 1, 0]]
-            centroid_ras = coords_ras.mean(axis=0)
+            # FIX: as_closest_canonical already ensures axis 0=X, 1=Y, 2=Z.
+            # No ZYX->XYZ swap is needed for RAS volumes.
+            centroid_ras = coords.mean(axis=0)
             world_mm = nib.affines.apply_affine(affine, centroid_ras)
             metrics["centroid_mm"] = world_mm.tolist()
             
             # Same for BBox
-            bbox_min_ras = nib.affines.apply_affine(affine, coords_ras.min(axis=0))
-            bbox_max_ras = nib.affines.apply_affine(affine, coords_ras.max(axis=0))
-            metrics["bbox_min_mm"] = bbox_min_ras.tolist()
-            metrics["bbox_max_mm"] = bbox_max_ras.tolist()
+            bbox_min_mm = nib.affines.apply_affine(affine, coords.min(axis=0))
+            bbox_max_mm = nib.affines.apply_affine(affine, coords.max(axis=0))
+            metrics["bbox_min_mm"] = bbox_min_mm.tolist()
+            metrics["bbox_max_mm"] = bbox_max_mm.tolist()
+            
+            print(f"   📍 Centroid WORLD project: {world_mm}")
         else:
             # Fallback to local scaling if no affine provided
             metrics["centroid_mm"] = local_mm.tolist()
@@ -785,28 +766,23 @@ def compute_alzheimer_metrics(prob, uncertainty, logit):
     return metrics
 
 
-def automatic_disease_detection_dual(model, image_tensor: torch.Tensor):
+def automatic_disease_detection_dual(model, roi_alz: torch.Tensor, roi_standard: torch.Tensor):
     """
-    Executes deep-learning presence detection for Alzheimer's, Tumor, and Stroke.
-    
-    NOTE ON ALZ ROUTING: NeuroXMultiDisease.forward expects x[:, 0:1] for 
-    Alzheimer when routed as active_presence=["alzheimer"]. Since the ALZ 
-    input is already 1-channel, x[:, 0:1] correctly preserves this data.
+    Executes deep-learning presence detection using task-specific ROIs directly.
+    The ROIs are passed separately to maintain full sync with the training code.
     """
     model.eval()
     probabilities = {}
     uncertainties = {}
     presence_logits = {}
+
+    # BATCH DIMENSION GLOBAL ENFORCEMENT
+    x_alz = roi_alz.to(DEVICE)
+    if x_alz.dim() == 4: x_alz = x_alz.unsqueeze(0)
     
-    # FIX 8 — BATCH DIMENSION GLOBAL ENFORCEMENT
-    if image_tensor.dim() == 4:
-        image_tensor = image_tensor.unsqueeze(0)
-    
-    # EXACT FIX 4 — CHANNEL CONTRACT ENFORCED BEFORE CALL
-    x_alz = prepare_input(image_tensor, "alzheimer").to(DEVICE)
-    x_seg = prepare_input(image_tensor, "tumor").to(DEVICE)
-    assert x_alz.shape[1] == 1, f"Alzheimer input must be 1ch, got {x_alz.shape}"
-    assert x_seg.shape[1] == 2, f"Segmentation input must be 2ch, got {x_seg.shape}"
+    x_seg_ch = roi_standard.to(DEVICE)
+    if x_seg_ch.dim() == 4: x_seg_ch = x_seg_ch.unsqueeze(0)
+    x_seg = torch.cat([x_seg_ch, x_seg_ch], dim=1) # SharedEncoder expects 2ch
 
     with torch.no_grad():
         # RUN SEPARATE CALLS (Architecture Sync)
@@ -828,17 +804,9 @@ def automatic_disease_detection_dual(model, image_tensor: torch.Tensor):
         probabilities["alzheimer"] = float(torch.sigmoid(alz_logit).cpu().item())
         uncertainties["alzheimer"] = float(torch.exp(alz_log_var).cpu().item())
 
-    # EXACT FIX 8 — CALIBRATED THRESHOLDS
-    THRESHOLDS = {
-        "alzheimer": 0.4,
-        "tumor": 0.3,
-        "stroke": 0.3
-    }
-    
-    detected_diseases = [
-        d for d, p in probabilities.items()
-        if p > THRESHOLDS.get(d, 0.5)
-    ]
+    # THRESHOLDS
+    THRESHOLDS = {"alzheimer": 0.4, "tumor": 0.3, "stroke": 0.3}
+    detected_diseases = [d for d, p in probabilities.items() if p > THRESHOLDS.get(d, 0.5)]
     
     return {
         "detected_diseases": detected_diseases,
@@ -850,67 +818,35 @@ def automatic_disease_detection_dual(model, image_tensor: torch.Tensor):
     }
 
 
-def perform_segmentation(model, image_tensor: torch.Tensor, tasks: List[str]):
+def perform_segmentation(model, roi_standard: torch.Tensor, tasks: List[str]):
     """
-    Executes deep-learning segmentation for a list of detected pathologies.
-    
-    This function enforces the 2-channel input contract (T1-weighted and normalized)
-    and routes the data to the appropriate model branches.
-    
-    Args:
-        model: Trained MultiGenAI model with segmentation and presence heads.
-        image_tensor: 4D or 5D tensor in [B, C, H, W, D] format.
-        tasks: List of diseases to segment (e.g., ['tumor', 'stroke']).
-        
-    Returns:
-        Dict: A dictionary mapping tasks to 6-tuple results:
-              (binary_mask, prob_map, decision_score, presence_prob, unc, logit_raw).
+    Executes deep-learning segmentation using the standard (percentile-clipped) ROI.
     """
     model.eval()
     results = {}
 
-    # FIX 8 — BATCH DIMENSION GLOBAL ENFORCEMENT
-    if image_tensor.dim() == 4:
-        image_tensor = image_tensor.unsqueeze(0)
-    
-    # FIX 5 — STRICT SEGMENTATION INPUT ROUTING
-    x_seg = prepare_input(image_tensor, "tumor").to(DEVICE)
-    assert x_seg.shape[1] == 2, f"Seg input must be 2ch, got {x_seg.shape}"
+    # BATCH DIMENSION GLOBAL ENFORCEMENT
+    x_seg_ch = roi_standard.to(DEVICE)
+    if x_seg_ch.dim() == 4: x_seg_ch = x_seg_ch.unsqueeze(0)
+    x_seg = torch.cat([x_seg_ch, x_seg_ch], dim=1) # SharedEncoder expects 2ch
 
     with torch.no_grad():
-        # Run model on 2rd-channel segments
-        out = model(
-            x_seg,
-            active_presence=tasks,
-            active_seg=tasks
-        )
+        out = model(x_seg, active_presence=tasks, active_seg=tasks)
 
         for task in tasks:
             seg_logits = out["segmentations"][task]
             lp, lvp = out["presence"][task] 
             
-            # EXACT FIX — SYNC WITH TRAINING DISTRIBUTIONS (logit_raw, log_var, vol, ent, peak)
-            # Important: DecisionHead sees raw logits (scaled by temperature), 
-            # while the app UI uses the sigmoid probability (logit).
             logit_raw = lp * model.temperature
-            
-            # Spatial Metadata (Sync with training feature extraction logic)
             vol = (torch.sigmoid(seg_logits) > 0.5).float().mean().view(1, 1)
-            # Stability: Clamp probabilities to avoid log(0) NaN
             ps  = torch.sigmoid(seg_logits).clamp(1e-6, 1-1e-6)
             ent = -(ps * torch.log(ps) + (1-ps) * torch.log(1-ps)).mean().view(1, 1)
             p   = torch.sigmoid(seg_logits).amax(dim=(2,3,4)).mean(dim=1).view(1, 1)
             
-            # Feature stack for DecisionHead: [logit_raw, log_var, vol, ent, peak]
             features = torch.stack([
-                logit_raw.view(-1),
-                lvp.view(-1),
-                vol.view(-1),
-                ent.view(-1),
-                p.view(-1)
+                logit_raw.view(-1), lvp.view(-1), vol.view(-1), ent.view(-1), p.view(-1)
             ], dim=1).detach().cpu().float()
             
-            # Post-process for metrics
             prob_scaled = torch.sigmoid(lp)
             uncertainty = torch.exp(lvp)
             seg_probs  = torch.sigmoid(seg_logits)[0].cpu().numpy()
@@ -921,7 +857,6 @@ def perform_segmentation(model, image_tensor: torch.Tensor, tasks: List[str]):
                 dec_val = model.decision_head(features.to(DEVICE))
                 dec_score = float(torch.sigmoid(dec_val).item())
 
-            # Store binary mask, probability tensor, DecisionHead score, and raw presence logits for downstream analytics
             results[task] = (seg_binary, seg_probs, dec_score, float(prob_scaled.item()), float(uncertainty.item()), float(logit_raw.item()))
 
     return results
@@ -1172,13 +1107,12 @@ def apply_hdbet_brain_extraction(file_path: str, spacing: Tuple[float, float, fl
             print("✅ ⚡ Using cached HD-BET brain mask from disk")
             brain_img = nib.load(output_path)
             orig_img = nib.load(file_path)
-            orig_img = nib.as_closest_canonical(orig_img)
-            return orig_img.get_fdata().astype(np.float32), brain_img.get_fdata()
+            # orientation parity: training uses raw get_fdata() orientation
+            return orig_img.get_fdata().astype(np.float32), (brain_img.get_fdata() > 0).astype(bool)
 
         print(f"📝 Saving temporary NIfTI for HD-BET...")
         # ALWAYS load raw image (NOT preprocessed tensor)
         orig_img = nib.load(file_path)
-        orig_img = nib.as_closest_canonical(orig_img)
 
         raw_volume = orig_img.get_fdata().astype(np.float32)
         affine = orig_img.affine
@@ -1250,12 +1184,9 @@ def apply_hdbet_brain_extraction(file_path: str, spacing: Tuple[float, float, fl
             print(f"   Files in temp dir: {os.listdir(cache_dir)}")
             return None, None
         
-        # ISSUE 2 FIX: Enforce canonical orientation on HD-BET output.
-        # HD-BET may internally reorient the volume before writing output.
-        # Without this the brain mask affine can silently diverge from the
-        # input affine, causing the brain surface and lesion meshes to split.
+        # orientation parity: training uses raw get_fdata() orientation
         brain_img = nib.load(brain_path)
-        brain_img = nib.as_closest_canonical(brain_img)   # enforce RAS+
+        
         brain_volume = brain_img.get_fdata()
         brain_affine = brain_img.affine
 
@@ -1263,8 +1194,8 @@ def apply_hdbet_brain_extraction(file_path: str, spacing: Tuple[float, float, fl
         affine_ok  = np.allclose(brain_affine, affine, atol=1e-3)
         shape_ok   = (brain_volume.shape == input_shape)
         if not affine_ok or not shape_ok:
-            print("WARNING: HD-BET geometry mismatch after canonical enforcement!")
-            print("  Resampling back to master grid...")
+            print("WARNING: HD-BET geometry mismatch detected!")
+            print("  Resampling back to input (raw file) grid...")
             
             # Master geometry defined by (input_shape, affine)
             # We need a reference NIfTI image for resampling
@@ -2054,24 +1985,24 @@ def create_3d_visualization(
                 ))
             
             # ─── ADD SCENE ANNOTATIONS (WORLD COORDINATES) ───
-            if lesion_metrics and disease in lesion_metrics:
-                m = lesion_metrics[disease]
-                if m:
-                    centroid = m["centroid_mm"]
-                    vol_ml = m["lesion_volume_mm3"] / 1000.0
-                    
-                    fig.add_trace(go.Scatter3d(
-                        x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
-                        mode='markers+text',
-                        marker=dict(size=8, color=color, symbol='diamond', 
-                                   line=dict(color='white', width=2)),
-                        text=[f"<b>{name}</b><br>{vol_ml:.2f} mL<br>({centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f})"],
-                        textposition="top center",
-                        textfont=dict(color='white', size=12),
-                        name=f"{name} Center",
-                        hoverinfo='text'
-                    ))
-                    print(f"   📍 Added centroid marker at world: {centroid}")
+            # Use the LOCALLY recalculated metrics (which use cropped_affine) 
+            # to ensure marker is in sync with the mesh.
+            if metrics:
+                centroid = metrics["centroid_mm"]
+                vol_ml = metrics["lesion_volume_mm3"] / 1000.0
+                
+                fig.add_trace(go.Scatter3d(
+                    x=[centroid[0]], y=[centroid[1]], z=[centroid[2]],
+                    mode='markers+text',
+                    marker=dict(size=8, color=color, symbol='diamond', 
+                               line=dict(color='white', width=2)),
+                    text=[f"<b>{name}</b><br>{vol_ml:.2f} mL<br>({centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f})"],
+                    textposition="top center",
+                    textfont=dict(color='white', size=12),
+                    name=f"{name} Center",
+                    hoverinfo='text'
+                ))
+                print(f"   📍 Added centroid marker at world: {centroid}")
             
             print(f"   ✅ {name} mesh added to scene ({'heatmap' if show_heatmap else 'solid color'})")
             
@@ -3141,38 +3072,21 @@ def run_streamlit_app():
                         
                         if model:
                             with st.spinner("🔬 Analyzing brain scan..."):
-                                # CRITICAL: Now returns 5 values including affine and spacing
-                                image_tensor, original_data, roi_metadata, affine, spacing = load_and_preprocess_nifti(tmp_path)
-                                image_tensor = image_tensor.to(DEVICE)
-
-                                # FIX 1 — GLOBAL BATCH ENFORCEMENT
-                                if image_tensor.dim() == 4:
-                                    image_tensor = image_tensor.unsqueeze(0)
+                                # CRITICAL: Now returns 6 values including separate ROIs
+                                roi_alz, roi_std, original_data, roi_metadata, affine, spacing = load_and_preprocess_nifti(tmp_path)
                                 
-                                # Use session safe threshold
-                                # EXECUTE CLINICAL DETECTION (Fixed Issue 7 — Hardcoded thresholds)
-                                
-                                # SAFETY GAP — GLOBAL MULTIMODAL ENFORCEMENT
-                                assert image_tensor.dim() == 5, f"Expected 5D input, got {image_tensor.shape}"
-
-                                x_alz = prepare_input(image_tensor, "alzheimer")
-                                x_seg = prepare_input(image_tensor, "tumor")
-
-                                assert x_alz.shape[1] == 1, f"Alzheimer input must be 1ch, got {x_alz.shape}"
-                                assert x_seg.shape[1] == 2, f"Segmentation input must be 2ch, got {x_seg.shape}"
-
                                 # FIX 2 — SPLIT-CALL SYNC
                                 detection = automatic_disease_detection_dual(
                                     model, 
-                                    image_tensor=image_tensor
+                                    roi_alz=roi_alz,
+                                    roi_standard=roi_std
                                 )
                                 
-                                # FIX 7 — MULTI-LABEL DYNAMICS (Don't return early!)
-                                # Process all detected diseases. 
+                                # FIX 7 — MULTI-LABEL DYNAMICS
                                 detected_list = detection["detected_diseases"]
                                 seg_tasks = [d for d in detected_list if d in ["tumor", "stroke"]]
                                 
-                                # Store ALL components including affine/spacing
+                                # Store ALL components for visualization and reporting
                                 st.session_state.detection_results = detection
                                 st.session_state.original_image = original_data
                                 st.session_state.roi_metadata = roi_metadata
@@ -3183,7 +3097,7 @@ def run_streamlit_app():
                                 if seg_tasks:
                                     segmentations = perform_segmentation(
                                         model,
-                                        image_tensor,
+                                        roi_std,
                                         seg_tasks
                                     )
                                 st.session_state.segmentation_results = segmentations

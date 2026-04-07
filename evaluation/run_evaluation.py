@@ -141,6 +141,11 @@ class NeuroXEvaluationPipeline:
         
         for idx, disease in enumerate(disease_names):
             logits = logits_dict[disease]
+            
+            # Extract logit if it's a tuple (logit, log_var)
+            if isinstance(logits, tuple):
+                logits = logits[0]
+                
             temp = optimal_temps[disease]
             
             # Uncalibrated

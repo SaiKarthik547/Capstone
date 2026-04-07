@@ -1,3 +1,4 @@
+#%%writefile app.py
 
 import os
 import sys
@@ -45,18 +46,21 @@ print("="*80)
 
 SEED = 42
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.benchmark = True  # Auto-tunes conv kernels for fixed (1,2,96,96,96) input
 ROI_SIZE = (96, 96, 96)
 BATCH_SIZE = 1
 ACCUM_STEPS = 4
-NUM_WORKERS = 1        
+NUM_WORKERS = 2        
 WEIGHT_DECAY = 1e-5
-EPOCHS = 48         
+EPOCHS = 26         
 USE_AMP = True       
-RESUME_PATH = "/kaggle/input/models/muntasaikarthik/26epchckp/other/default/1/neurox_last (1).pth"   # Manual resume path (e.g., /kaggle/input/weights/neurox_last.pth)
+USE_ATTENTION_GATES = False # Global Toggle (Ablation Finding: Gates hurt multi-task learning)
+RESUME_PATH = "/kaggle/input/models/muntasaikarthik/last-checkpoint1/other/default/1/neurox_last.pth"   # Manual resume path (e.g., /kaggle/input/weights/neurox_last.pth)
 
 # Section A: DETERMINISTIC ROOTS
 TUMOR_ROOT  = Path(os.environ.get("TUMOR_ROOT", "/kaggle/input/datasets/awsaf49/brats20-dataset-training-validation"))
 STROKE_ROOT = Path(os.environ.get("STROKE_ROOT", "/kaggle/input/datasets/orvile/isles-2022-brain-stoke-dataset/ISLES-2022/ISLES-2022"))
+ATLAS_ROOT  = Path(os.environ.get("ATLAS_ROOT",  "/kaggle/input/datasets/muntasaikarthik/atlas-r2-dataset/ATLAS_2/Training"))
 # Section A: DUAL ALZHEIMER ROOTS (Alz A: Preprocessed, Alz B: Raw/Sorted)
 ALZ_A_ROOT  = Path(os.environ.get("ALZ_A_ROOT", "/kaggle/input/datasets/summaiyamahmood/adni-preprocessed"))
 ALZ_B_ROOT  = Path(os.environ.get("ALZ_B_ROOT", "/kaggle/input/datasets/summaiyamahmood/adni-677-sorted"))
@@ -82,7 +86,8 @@ CHECKPOINT_DIR = Path("./checkpoints")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 # Cache setup (Section C)
-CACHE_VERSION = "v7_2ch_flair"
+CACHE_VERSION   = "v7_2ch_flair"   # Tumor cache version (unchanged)
+STROKE_CACHE_V  = "v8_modal"        # Stroke-specific: modality channel replaces duplicate
 CACHE_DIR = Path("/kaggle/working/cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 print(f"📦 Using persistent cache ({CACHE_VERSION}) at {CACHE_DIR}")
@@ -112,6 +117,51 @@ def load_nifti(path: Path) -> np.ndarray:
         return np.asarray(data, dtype=np.float32)
     except Exception as e:
         raise RuntimeError(f"Failed to load NIfTI: {path} | Error: {e}")
+
+def load_nifti_safe(path) -> np.ndarray:
+    """Safe NIfTI loader: handles file paths AND directory paths (ATLAS-style structure)."""
+    path = str(path)
+    if os.path.isdir(path):
+        for root_dir, _, files in os.walk(path):
+            for f in files:
+                if f.endswith(".nii") or f.endswith(".nii.gz"):
+                    return nib.load(os.path.join(root_dir, f)).get_fdata().astype(np.float32)
+        raise RuntimeError(f"No NIfTI file found in directory: {path}")
+    return nib.load(path).get_fdata().astype(np.float32)
+
+def build_atlas_cases(root_dir: Path) -> list:
+    """Scan ATLAS R2 dataset and return valid T1w + lesion mask pairs.
+
+    Filters cases with lesion mask < 50 voxels (too small for stable Dice gradient).
+    Returns list of dicts: {'type': 'atlas', 'image': path, 'mask': path}
+    """
+    cases = []
+    for root_str, _, _ in os.walk(str(root_dir)):
+        if os.path.basename(root_str) == "anat":
+            nii_files = []
+            for r, _, files in os.walk(root_str):
+                for f in files:
+                    if f.endswith(".nii") or f.endswith(".nii.gz"):
+                        nii_files.append(os.path.join(r, f))
+            image, mask = None, None
+            for f in nii_files:
+                fl = f.lower()
+                if "lesion" in fl:
+                    mask = f
+                elif "t1w" in fl or "norm" in fl:
+                    image = f
+            if image and mask:
+                cases.append({"type": "atlas", "image": image, "mask": mask})
+    filtered = []
+    for c in cases:
+        try:
+            m = load_nifti_safe(c["mask"])
+            if np.sum(m) > 50:
+                filtered.append(c)
+        except Exception:
+            continue
+    print(f"\u2705 ATLAS Builder: {len(cases)} found \u2192 {len(filtered)} after lesion filter (>50 voxels)")
+    return filtered
 
 def resize_volume(volume: torch.Tensor, is_mask: bool) -> torch.Tensor:
     """Helper: Resize to ROI_SIZE with appropriate interpolation."""
@@ -297,13 +347,16 @@ class TumorDataset(Dataset):
 
 class StrokeDataset(Dataset):
     """ISLES 2022: DWI/ADC Input -> Binary Mask Target"""
-    def __init__(self, root_path: str, debug=False):
+    def __init__(self, root_path: str, extra_cases: list = None, debug=False):
         self.root = Path(root_path)
         self.cases = self._find_cases()
+        if extra_cases:
+            self.cases = self.cases + list(extra_cases)
+            print(f"  ➕ Merged {len(extra_cases)} ATLAS cases. Total stroke: {len(self.cases)}")
         if debug:
-            self.cases = self.cases[:20]
+            self.cases = self.cases[:30]
             print(f"⚠️ DEBUG: Stroke dataset restricted to {len(self.cases)} cases")
-        print(f"✅ Stroke Dataset: {len(self.cases)} cases")
+        print(f"✅ Stroke Dataset: {len(self.cases)} cases (ISLES + ATLAS)")
 
     def _find_cases(self):
         """Flexible deep finder for ISLES-2022 structure at any nesting depth.
@@ -362,42 +415,61 @@ class StrokeDataset(Dataset):
 
     def __getitem__(self, idx):
         case = self.cases[idx]
-        # Section C: SAFE CACHE (v7 torch-native)
-        cache_key = CACHE_DIR / f"{Path(case['adc']).stem}_{CACHE_VERSION}.pt"
+        is_atlas = case.get("type") == "atlas"
+
+        # Cache key — use the correct image path stem for ISLES vs ATLAS
+        img_path_str = str(case["image"]) if is_atlas else str(case["adc"])
+        cache_key = CACHE_DIR / f"{Path(img_path_str).stem}_{STROKE_CACHE_V}.pt"
+
         if cache_key.exists():
             try:
                 data = torch.load(cache_key, weights_only=True)
                 image, target = data["image"], data["target"]
                 if image.shape[1:] != ROI_SIZE or image.shape[0] not in (1, 2) or torch.isnan(image).any():
-                    raise ValueError("Shape mismatch")
-                return {"image": image, "seg": target, "has_seg": torch.tensor([1.0]), "path": str(case["adc"]), "presence": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([1.0]), "alzheimer": torch.tensor([0.0])}, "has_label": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([1.0]), "alzheimer": torch.tensor([0.0])}}
+                    raise ValueError("Shape mismatch — expected 2-ch modality image")
+                has_stroke = 1.0 if target.sum() > 0 else 0.0
+                return {"image": image, "seg": target, "has_seg": torch.tensor([1.0]),
+                        "path": img_path_str,
+                        "presence": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([has_stroke]), "alzheimer": torch.tensor([0.0])},
+                        "has_label": {"tumor": torch.tensor([0.0]), "stroke": torch.tensor([1.0]), "alzheimer": torch.tensor([0.0])}}
             except Exception:
                 cache_key.unlink(missing_ok=True)
-        
-        # 🧩 Domain B: 2-Channel Stroke (DWI/ADC Duplicated for Encoder Compatibility)
-        vol_img = load_nifti(case["adc"])
-        vol_msk = load_nifti(case["msk"])
-        
-        img_base = universal_preprocess(vol_img, is_mask=False)
-        image = torch.cat([img_base, img_base], dim=0) # shape (2, 96, 96, 96)
-        
+
+        if is_atlas:
+            # ATLAS: T1w image + lesion mask. Z-score ONLY (prevents ATLAS/ISLES identity learning)
+            vol_img = load_nifti_safe(case["image"]).astype(np.float32)
+            vol_msk = load_nifti_safe(case["mask"]).astype(np.float32)
+            vol_img = (vol_img - np.mean(vol_img)) / (np.std(vol_img) + 1e-8)
+            vol_img = np.clip(vol_img, -5, 5)  # Clamp: removes extreme artifacts, stabilizes cross-dataset training
+            img_tensor = torch.from_numpy(vol_img).float()
+            img_base = resize_volume(img_tensor, is_mask=False)
+            validate_tensor(img_base, "ATLAS Stroke Volume")
+        else:
+            # ISLES: ADC image — standard percentile clip + z-score pipeline
+            vol_img = load_nifti(case["adc"])
+            vol_msk = load_nifti(case["msk"])
+            img_base = universal_preprocess(vol_img, is_mask=False)
+
+        # Modality channel: ATLAS=1.0 (T1w source), ISLES=0.0 (ADC source)
+        # Replaces the meaningless duplicate second channel — encoder now knows the input domain
+        modality_ch = torch.ones_like(img_base) if is_atlas else torch.zeros_like(img_base)
+        image = torch.cat([img_base, modality_ch], dim=0)  # (2, 96, 96, 96)
         mask = universal_preprocess(vol_msk, is_mask=True)
         target = (mask > 0).float()
-            
+
         # Save to cache with disk-safe guard
         try:
             if shutil.disk_usage(str(CACHE_DIR)).free > 5 * 1024**3:
                 torch.save({"image": image, "target": target}, cache_key)
         except Exception:
             pass
-        
+
         has_stroke = 1.0 if target.sum() > 0 else 0.0
-        
         return {
             "image": image,
             "seg": target,
             "has_seg": torch.tensor([1.0]),
-            "path": str(case["adc"]), # Fix: Added path for spacing extraction
+            "path": img_path_str,
             "presence": {
                 "tumor": torch.tensor([0.0]),
                 "stroke": torch.tensor([has_stroke]),
@@ -458,9 +530,15 @@ class AlzheimerDataset(Dataset):
             # Part 2: Light pipeline separation — replaces shared preprocessing
             image = preprocess_alz_light(vol)
 
-            _tmp = str(cache_key) + ".tmp.npz"
-            np.savez_compressed(_tmp, image=image.numpy())
-            os.replace(_tmp, cache_key)  
+            # Change 533-535: Use unique temporary filename to avoid cache race conditions (ISSUE 3 FIX)
+            import uuid
+            _tmp = f"{str(cache_key)}_{uuid.uuid4().hex}.tmp.npz"
+            try:
+                np.savez_compressed(_tmp, image=image.numpy())
+                os.replace(_tmp, cache_key)
+            except Exception:
+                if os.path.exists(_tmp):
+                    os.remove(_tmp)
 
         if self.augment:
             if random.random() < 0.5:
@@ -747,15 +825,30 @@ class SegmentationDecoder(nn.Module):
         )
     
     def forward(self, enc_features, bottleneck_features):
+        # Mandatory Runtime Check
+        
+             
         e1, e2, e3 = enc_features["enc1"], enc_features["enc2"], enc_features["enc3"]
         b = bottleneck_features # This is the output of the TransformerBottleneck3D
         u3 = self.up3(b)
-        d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        
+        # A: Bypass Attention Gates (Global Toggle)
+        if USE_ATTENTION_GATES:
+            d3 = self.dec3(torch.cat([u3, self.att3(u3, e3)], dim=1))
+        else:
+            d3 = self.dec3(torch.cat([u3, e3], dim=1))
         
         u2 = self.up2(d3)
-        d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
+        if USE_ATTENTION_GATES:
+            d2 = self.dec2(torch.cat([u2, self.att2(u2, e2)], dim=1))
+        else:
+            d2 = self.dec2(torch.cat([u2, e2], dim=1))
+            
         u1 = self.up1(d2)
-        d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
+        if USE_ATTENTION_GATES:
+            d1 = self.dec1(torch.cat([u1, self.att1(u1, e1)], dim=1))
+        else:
+            d1 = self.dec1(torch.cat([u1, e1], dim=1))
         
         main = self.output_head(d1)
         return main
@@ -987,6 +1080,17 @@ def compute_dice_loss(logits, targets):
     dice = (2. * intersection + smooth) / (union + smooth)
     return 1.0 - dice.mean()
 
+def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
+    """Focal Loss: down-weights easy voxels, forces focus on hard lesion boundaries.
+    Fixes stroke Dice plateau by generating gradient for hard negative/positive voxels.
+    alpha=0.25, gamma=2.0 are standard ISLES/BraTS tuned values.
+    """
+    probs = torch.sigmoid(logits)
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    pt = probs * targets + (1 - probs) * (1 - targets)  # p_t: correct class probability
+    loss = alpha * (1 - pt) ** gamma * bce
+    return loss.mean()
+
 def quick_dice(probs, targets):
     """Soft Dice Score (0-1) for logging. Expects sigmoid probabilities [0,1], NOT logits."""
     # Do NOT apply sigmoid here — callers pass torch.sigmoid(output) directly.
@@ -1187,14 +1291,16 @@ def evaluate_segmentation_full(model, tumor_val_loader, stroke_val_loader, epoch
                 for b in range(img.shape[0]):
                     g = (gt_np[b, 0] > 0.5).astype(np.uint8)
                     p_cal = (probs[b, 0] > 0.5).astype(np.uint8)
-                    
-                    stroke_metrics["dice"].append(dice_score(p_cal, g))
-                    stroke_metrics["iou"].append(iou_score(p_cal, g))
-                    stroke_metrics["ve"].append(volume_error(p_cal, g))
-                    
-                    if run_hd:
-                        stroke_metrics["hd95"].append(hausdorff95(p_cal, g, spacing=spacing))
-                        stroke_metrics["asd"].append(average_surface_distance(p_cal, g, spacing=spacing))
+
+                    # Step 8: Foreground-aware — skip background-only samples (prevents 0.50 plateau bias)
+                    if g.sum() > 0:
+                        stroke_metrics["dice"].append(dice_score(p_cal, g))
+                        stroke_metrics["iou"].append(iou_score(p_cal, g))
+                        stroke_metrics["ve"].append(volume_error(p_cal, g))
+
+                        if run_hd:
+                            stroke_metrics["hd95"].append(hausdorff95(p_cal, g, spacing=spacing))
+                            stroke_metrics["asd"].append(average_surface_distance(p_cal, g, spacing=spacing))
 
     model.train()
     
@@ -1352,7 +1458,8 @@ def train_step(model, batch, task, optimizer, scaler, epoch,
                     seg_logits, tgt, pos_weight=STROKE_POS_WEIGHT).mean()
             else:
                 loss_bce = F.binary_cross_entropy_with_logits(seg_logits, tgt).mean()
-            loss_seg = 0.8 * loss_dice + 0.2 * loss_bce
+            loss_focal = focal_loss(seg_logits, tgt)
+            loss_seg = loss_dice + 0.5 * loss_bce + 0.3 * loss_focal  # Dice+BCE+Focal (hard voxel fix)
             
             lam = LAMBDA_TUMOR if task == "tumor" else LAMBDA_STROKE
             total_loss = lam * loss_seg + LAMBDA_CLS * loss_pres
@@ -1483,14 +1590,23 @@ def main():
             print("⚠️ No tumor data found.")
     except Exception as e: print(f"⚠️ Serious Tumor Load Error: {e}")
 
-    # Stroke
+    # Stroke (ISLES 2022 + ATLAS R2 merged)
     try:
-        stroke_ds_full = StrokeDataset(STROKE_ROOT, debug=DEBUG)
+        print(f"   Building ATLAS cases from {ATLAS_ROOT}...")
+        atlas_cases = build_atlas_cases(ATLAS_ROOT) if ATLAS_ROOT.exists() else []
+        stroke_ds_full = StrokeDataset(STROKE_ROOT, extra_cases=atlas_cases, debug=DEBUG)
         if len(stroke_ds_full) > 0:
-            idx_s = range(len(stroke_ds_full))
-            train_idx, val_idx = train_test_split(idx_s, test_size=0.2, random_state=SEED)
-            stroke_train_ds = torch.utils.data.Subset(stroke_ds_full, train_idx)
-            stroke_val_ds   = torch.utils.data.Subset(stroke_ds_full, val_idx)
+            idx_s = list(range(len(stroke_ds_full)))
+            train_idx_s, val_idx_s = train_test_split(idx_s, test_size=0.2, random_state=SEED)
+            stroke_train_ds = torch.utils.data.Subset(stroke_ds_full, train_idx_s)
+            stroke_val_ds   = torch.utils.data.Subset(stroke_ds_full, val_idx_s)
+            # Step 7: Weighted sampler -- ISLES=1.0, ATLAS=0.3 (ISLES=lesion definition, ATLAS=diversity)
+            from torch.utils.data import WeightedRandomSampler as _WRS
+            _sw = [0.3 if stroke_ds_full.cases[i].get("type") == "atlas" else 1.0 for i in train_idx_s]
+            stroke_loader = DataLoader(stroke_train_ds, batch_size=BATCH_SIZE,
+                                       sampler=_WRS(_sw, len(_sw), replacement=True),
+                                       num_workers=NUM_WORKERS, pin_memory=True,
+                                       persistent_workers=True)
     except Exception as e: print(f"⚠️ Stroke Load Error: {e}")
 
     # Alzheimer (Hybrid Load: Alz A + Alz B)
@@ -1512,11 +1628,13 @@ def main():
         raise RuntimeError("❌ HARD STOP: No valid datasets found across any task.")
 
     # STEP 8: CREATE DATALOADERS
-    loader_kwargs = dict(batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=False)
-    val_kwargs    = dict(batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=False)
+    loader_kwargs = dict(batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
+    val_kwargs    = dict(batch_size=2, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True, persistent_workers=True)
 
     tumor_loader  = DataLoader(tumor_train_ds, **loader_kwargs) if tumor_train_ds else None
-    stroke_loader = DataLoader(stroke_train_ds, **loader_kwargs) if stroke_train_ds else None
+    # stroke_loader already created above with WeightedRandomSampler (ISLES=1.0, ATLAS=0.5)
+    if stroke_loader is None and stroke_train_ds is not None:
+        stroke_loader = DataLoader(stroke_train_ds, **loader_kwargs)
     
     # Part 3: WeightedRandomSampler — ensures balanced AD/CN across all batches
     if alz_train_ds:
@@ -1525,15 +1643,20 @@ def main():
         class_counts     = np.bincount(alz_labels)
         class_weights    = 1.0 / (class_counts + 1e-6)
         sample_weights   = [class_weights[l] for l in alz_labels]
+        # Phase-aware oversampling:
+        # Fresh start (no checkpoint): 2x = 1932 steps — encoder needs max gradient signal during ALZ warmup
+        # Resumed run (checkpoint exists): 1x = 966 steps — warmup done, keeps max_steps ≤ 1000 for joint phase
+        _alz_oversample = 1 if (RESUME_PATH and Path(RESUME_PATH).exists()) else 2
         alz_sampler      = WeightedRandomSampler(
             sample_weights,
-            num_samples=len(sample_weights) * 2, # Part 4: 2x oversampling to increase signal
+            num_samples=len(sample_weights) * _alz_oversample,
             replacement=True
         )
         alz_loader = DataLoader(
             alz_train_ds, batch_size=BATCH_SIZE,
             sampler=alz_sampler,
-            num_workers=NUM_WORKERS, pin_memory=True
+            num_workers=NUM_WORKERS, pin_memory=True,
+            persistent_workers=True
         )
     else:
         alz_loader = None
@@ -1595,7 +1718,7 @@ def main():
         pos, neg = alz_pos, alz_neg
 
     if stroke_train_ds:
-        STROKE_POS_WEIGHT = torch.tensor([20.0], device=DEVICE)
+        STROKE_POS_WEIGHT = torch.tensor([5.0], device=DEVICE)  # Reduced from 20.0 (was causing BCE instability)
     else:
         STROKE_POS_WEIGHT = torch.tensor([1.0], device=DEVICE)
 
@@ -1735,17 +1858,30 @@ def main():
         global LAMBDA_CLS
         USE_AMP = True
 
-        # Fix 1: Phase-aware LR for ALZ optimizer (set before any reset)
+        # Fix 1: Phase-aware LR for ALZ optimizer
+        # ep27-29: 3-epoch re-warm burst after optimizer reset to escape collapse basin fast
+        # ep30+:   conservative joint learning rate
         if epoch <= 10:
             lr_alz = 3e-5
         elif epoch <= 26:
             lr_alz = 1.5e-5
+        elif epoch <= 29:
+            lr_alz = 3e-5   # Re-warm burst: escape negative-momentum collapse basin
         else:
             lr_alz = 1e-5
         # Update existing optimizer LR each epoch
         for pg in optimizer_alz.param_groups:
             pg["lr"] = lr_alz
-            
+
+        # ep27: Reset ALZ Adam state — clears Phase-1 stale negative momentum
+        # At ep27, beta1=0.9 means 0.9^17 ≈ 35% of Phase-1 negative momentum still active.
+        # At lr=1e-5 (without reset), escaping the collapse basin takes ~10+ joint epochs.
+        # Resetting m/v here + 3-epoch re-warm cuts that to ~2-3 epochs.
+        if epoch == 27:
+            optimizer_alz.state.clear()
+            print("🔄 ep27: ALZ optimizer state reset — stale negative momentum cleared for joint phase")
+
+
         # Section F: PHASE-AWARE CURRICULUM (Sourced from top-level PHASE_CONFIG)
         active_phase = None
         for cutoff in sorted(PHASE_CONFIG.keys()):
